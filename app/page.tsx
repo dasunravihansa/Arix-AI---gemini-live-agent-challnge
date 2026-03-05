@@ -537,8 +537,11 @@ export default function Home() {
 
           } else if (msg.type === "turn_complete") {
             // Backend indicates Gemini finished its reply and is ready for the next user turn
-            console.log("[WS] turn_complete received – backend ready for more audio");
-            // optionally update UI or states here if needed
+            console.log("[WS] ✅ turn_complete received – backend ready for more audio");
+            // Resume listening: ensure mic is still streaming fresh audio
+            if (scriptProcessorRef.current && recordingContextRef.current) {
+              console.log("[WS] 🎤 Mic ready for next question");
+            }
 
           } else if (msg.type === "live_text" && msg.data) {
             // Fallback: if text arrives, speak it
