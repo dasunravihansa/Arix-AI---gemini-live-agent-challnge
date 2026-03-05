@@ -1,0 +1,48 @@
+{
+  "manifest_version": 3,
+  "name": "Arix Gemini: AI Guided Tutor",
+  "version": "1.0.2",
+  "description": "Next-generation AI tutor with real-time screen navigation and guided learning. Configurable Privacy Permissions.",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "sidePanel"
+  ],
+  "optional_permissions": [
+    "tabs",
+    "scripting",
+    "desktopCapture",
+    "notifications",
+    "alarms"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_start"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "icons": {
+    "16": "logo.png",
+    "48": "logo.png",
+    "128": "logo.png"
+  },
+  "action": {
+    "default_title": "Open Arix Gemini",
+    "default_popup": "index.html",
+    "default_icon": "logo.png"
+  },
+  "side_panel": {
+    "default_path": "index.html"
+  }
+}
