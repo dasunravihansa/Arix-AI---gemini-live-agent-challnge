@@ -405,8 +405,6 @@ export default function Home() {
 
       // wasConnected flag: backend natively connected da no da check karanna
       let wasConnected = false;
-      // timer to detect end of audio stream (fallback if backend turn_complete missing)
-      let audioTimer: ReturnType<typeof setTimeout> | null = null;
 
       ws.onopen = () => {
         wasConnected = true;
@@ -526,14 +524,6 @@ export default function Home() {
             }
 
             audioQueueRef.current.push(float32);
-
-            // reset audio end timer (fallback detection)
-            if (audioTimer) {
-              clearTimeout(audioTimer);
-            }
-            audioTimer = setTimeout(() => {
-              console.log("[WS] audio timeout: agent likely finished speaking");
-            }, 400);
 
             // KEY FIX: Resume AudioContext if blocked by browser autoplay policy
             if (audioContextRef.current && audioContextRef.current.state === "suspended") {
