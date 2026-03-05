@@ -154,6 +154,14 @@ async def live_voice_session(websocket: WebSocket):
                                     # Text part (fallback)
                                     elif part.text:
                                         print(f"[TEXT] Gemini: {part.text[:80]}")
+                            
+                            # Turn-based conversation: After Arix responds, signal ready for next input
+                            if sc.turn_complete:
+                                print("[ARIX] ✅ Response complete. Ready for next user input...")
+                                await websocket.send_json({
+                                    "type": "turn_complete",
+                                    "ready": True
+                                })
 
                         # ── Handle Tool Calls (screen capture request) ────────
                         if response.tool_call:
