@@ -535,6 +535,11 @@ export default function Home() {
               playNextAudioChunk();
             }
 
+          } else if (msg.type === "turn_complete") {
+            // Backend indicates Gemini finished its reply and is ready for the next user turn
+            console.log("[WS] turn_complete received – backend ready for more audio");
+            // optionally update UI or states here if needed
+
           } else if (msg.type === "live_text" && msg.data) {
             // Fallback: if text arrives, speak it
             speak(msg.data);
