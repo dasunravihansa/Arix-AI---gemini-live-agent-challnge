@@ -132,6 +132,8 @@ async def live_voice_session(websocket: WebSocket):
             async def receive_from_gemini():
                 try:
                     async for response in session.receive():
+                        # DEBUG: dump raw response object for troubleshooting
+                        print("[GEMINI] raw response:", response)
 
                         # ── Handle audio / text parts ────────────────────────
                         if response.server_content:
@@ -154,10 +156,17 @@ async def live_voice_session(websocket: WebSocket):
                                     # Text part (fallback)
                                     elif part.text:
                                         print(f"[TEXT] Gemini: {part.text[:80]}")
-                            
+
                             # Turn-based conversation: After Arix responds, signal ready for next input
-                            if sc.turn_complete:
+                            if getattr(sc, 'turn_complete', False):
                                 print("[ARIX] ✅ Response complete. Ready for next user input...")
+                                await websocket.send_json({
+                                    "type": "turn_complete",
+                                    "ready": True
+                                })
+                            else:
+                                # fallback: always send a turn_complete after any server_content block
+                                print("[ARIX] fallback turn_complete send (no explicit flag)")
                                 await websocket.send_json({
                                     "type": "turn_complete",
                                     "ready": True
