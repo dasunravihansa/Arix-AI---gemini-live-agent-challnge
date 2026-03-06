@@ -159,17 +159,20 @@ async def live_voice_session(websocket: WebSocket):
 
                             # Turn-based conversation: After Arix responds, signal ready for next input
                             if getattr(sc, 'turn_complete', False):
-                                print("[ARIX] ✅ Response complete. Ready for next user input...")
+                                print("[ARIX] ✅ Turn complete. Ready for next input.")
                                 await websocket.send_json({
                                     "type": "turn_complete",
                                     "ready": True
                                 })
-                            else:
-                                # fallback: always send a turn_complete after any server_content block
-                                print("[ARIX] fallback turn_complete send (no explicit flag)")
+                                # 🔥 FIX: Send "keep_alive" signal to frontend
                                 await websocket.send_json({
-                                    "type": "turn_complete",
-                                    "ready": True
+                                    "type": "keep_streaming",
+                                    "message": "කතා කරන්නකෝ! 🎤"
+                                })
+                                # 🎯 Production Solution: Send continuous streaming signal
+                                await websocket.send_json({
+                                    "type": "continue_streaming",
+                                    "status": "listening"
                                 })
 
                         # ── Handle Tool Calls (screen capture request) ────────

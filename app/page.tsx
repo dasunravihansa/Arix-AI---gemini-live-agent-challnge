@@ -535,13 +535,22 @@ export default function Home() {
               playNextAudioChunk();
             }
 
+          } else if (msg.type === "continue_streaming") {
+            console.log("[ARIX] Continuous streaming active...");
+            // Ensure mic context is running
+            if (recordingContextRef.current && recordingContextRef.current.state !== 'running') {
+              console.warn("[AUDIO] Recording context not running, resuming...");
+              recordingContextRef.current.resume();
+            }
+
+          } else if (msg.type === "keep_streaming") {
+            console.log("[ARIX] Keep streaming audio...");
+            // Mic processor continues running - no interruption needed
+
           } else if (msg.type === "turn_complete") {
             // Backend indicates Gemini finished its reply and is ready for the next user turn
-            console.log("[WS] ✅ turn_complete received – backend ready for more audio");
-            // Resume listening: ensure mic is still streaming fresh audio
-            if (scriptProcessorRef.current && recordingContextRef.current) {
-              console.log("[WS] 🎤 Mic ready for next question");
-            }
+            console.log("✅ Ready for next question");
+            // DON'T stop mic here - just log
 
           } else if (msg.type === "live_text" && msg.data) {
             // Fallback: if text arrives, speak it
@@ -845,7 +854,7 @@ export default function Home() {
               transition={{ duration: 0.8, type: "spring" }}
               className="relative flex flex-col items-center justify-center mt-10"
             >
-              <div className="relative flex items-center justify-center w-64 h-64">
+              <div className="relative flex items-center justify-center w-48 h-48 sm:w-64 sm:h-64">
 
                 {/* Outer Glow */}
                 <motion.div
@@ -891,7 +900,7 @@ export default function Home() {
         initial={{ opacity: 0, y: 40 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ delay: 0.5, duration: 0.7, ease: "easeOut" }}
-        className="absolute bottom-12 flex w-[90%] max-w-4xl flex-col items-center z-20"
+        className="absolute bottom-8 sm:bottom-12 flex w-[90%] max-w-full sm:max-w-4xl flex-col items-center z-20"
       >
 
         <div className="w-full flex-col flex items-center justify-center gap-6 mt-10">
@@ -1007,7 +1016,7 @@ export default function Home() {
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 40, scale: 0.97 }}
             transition={{ type: "spring", damping: 25, stiffness: 300 }}
-            className="fixed bottom-6 right-6 w-95 max-h-130 bg-white rounded-3xl shadow-2xl border border-gray-100 flex flex-col overflow-hidden z-50"
+            className="fixed bottom-6 right-6 w-[95vw] sm:w-95 max-w-sm sm:max-w-none max-h-[85vh] sm:max-h-130 bg-white rounded-3xl shadow-2xl border border-gray-100 flex flex-col overflow-hidden z-50"
           >
             {/* Chat Header */}
             <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 bg-linear-to-r from-blue-50 to-indigo-50">

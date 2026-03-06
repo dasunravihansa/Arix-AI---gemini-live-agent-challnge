@@ -15,7 +15,8 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Arix AI",
   description: "Arix AI is a next-generation AI tutor with real-time screen navigation and guided learning.",
-
+  // ensure the page scales properly on mobile devices
+  viewport: "width=device-width, initial-scale=1",
 };
 
 export default function RootLayout({
