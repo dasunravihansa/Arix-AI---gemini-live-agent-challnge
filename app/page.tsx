@@ -316,7 +316,10 @@ export default function Home() {
         processor.onaudioprocess = (e) => {
           if (!ws || ws.readyState !== WebSocket.OPEN) return;
           // FIX: block mic when Arix speaking
-          if (arixStateRef.current === "speaking") return;
+          if (arixStateRef.current === "speaking") {
+            console.log("🔴 MIC BLOCKED — Arix speaking");
+            return;
+          }
 
           const float32 = e.inputBuffer.getChannelData(0);
           const vol = float32.reduce((s, v) => s + Math.abs(v), 0) / float32.length;
@@ -325,6 +328,7 @@ export default function Home() {
           if (isVoice && !isSpeakingRef.current) {
             isSpeakingRef.current = true;
             if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+            console.log("🎙️ activity_start sent | arixState:", arixStateRef.current);
             ws.send(JSON.stringify({ type: "activity_start" }));
           }
           if (isVoice) {
@@ -332,6 +336,7 @@ export default function Home() {
             silenceTimerRef.current = setTimeout(() => {
               if (isSpeakingRef.current) {
                 isSpeakingRef.current = false;
+                console.log("🔇 activity_end sent");
                 ws.send(JSON.stringify({ type: "activity_end" }));
               }
             }, 1500);
@@ -365,6 +370,7 @@ export default function Home() {
           if (msg.type === "capture_screen_request") {
             if (!showExtensionPopup) window.postMessage({ type: "ARIX_CAPTURE_SCREEN" }, "*");
           } else if (msg.type === "audio" && msg.data) {
+            console.log("🔊 Audio chunk received — setting arixState=speaking");
             setArixState("speaking"); arixStateRef.current = "speaking";
             const bytes = new Uint8Array([...window.atob(msg.data)].map(c => c.charCodeAt(0)));
             const int16 = new Int16Array(bytes.buffer);
@@ -379,7 +385,7 @@ export default function Home() {
             const wait = () => {
               if (!waitForAudioActiveRef.current) return;
               if (!isPlayingRef.current && !audioQueueRef.current.length) {
-                console.log("🎤 Audio done — mic now active");
+                console.log("🎤 Audio done — mic now active | setting arixState=listening");
                 setArixState("listening"); arixStateRef.current = "listening";
                 isSpeakingRef.current = false;
                 if (silenceTimerRef.current) { clearTimeout(silenceTimerRef.current); silenceTimerRef.current = null; }
@@ -550,11 +556,11 @@ export default function Home() {
                   transition={{ duration: 3, repeat: Infinity, ease: "easeInOut" }}
                   className="absolute w-full h-full rounded-full bg-[#7ba2e8] blur-3xl opacity-30" />
                 <motion.div
-                  animate={{ borderRadius: [`60% 40% 30% 70%/60% 30% 70% 40%`, `30% 70% 70% 30%/30% 30% 70% 70%`, `60% 40% 30% 70%/60% 30% 70% 40%`], rotate: [0, 360] }}
+                  animate={{ borderRadius: ["60% 40% 30% 70%/60% 30% 70% 40%", "30% 70% 70% 30%/30% 30% 70% 70%", "60% 40% 30% 70%/60% 30% 70% 40%"], rotate: [0, 360] }}
                   transition={{ duration: 10, repeat: Infinity, ease: "linear" }}
                   className="absolute w-44 h-44 bg-linear-to-tr from-[#7ba2e8] via-purple-400 to-[#9cbffc] shadow-[0_0_50px_rgba(123,162,232,0.6)]">
-                    <div className="absolute inset-0 rounded-full bg-linear-to-b from-white/40 to-transparent" />
-                  </motion.div>
+                  <div className="absolute inset-0 rounded-full bg-linear-to-b from-white/40 to-transparent" />
+                </motion.div>
               </div>
               <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.5 }}
                 className="absolute -bottom-8 text-gray-600 font-semibold flex items-center gap-2">
