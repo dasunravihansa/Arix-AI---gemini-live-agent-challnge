@@ -63,6 +63,22 @@ SYSTEM_PROMPT = (
 )
 
 # ─── Gemini Live Session Config ───────────────────────────────────────────────
+
+async def send_keepalive(session):
+    """Send silent PCM audio every 10s to keep Gemini Live session alive."""
+    silence = b'\x00\x00' * 1600  # 100ms of silence at 16kHz
+    while True:
+        await asyncio.sleep(10)
+        try:
+            await session.send_realtime_input(
+                audio=types.Blob(data=silence, mime_type="audio/pcm;rate=16000")
+            )
+            print("[KEEPALIVE] Sent silent audio to keep session alive")
+        except Exception as e:
+            print(f"[KEEPALIVE] Error: {e}")
+            break
+
+
 def build_config() -> types.LiveConnectConfig:
     return types.LiveConnectConfig(
         response_modalities=["AUDIO"],  # gemini-2.0-flash-lite-001 only supports AUDIO in Live API
@@ -71,6 +87,12 @@ def build_config() -> types.LiveConnectConfig:
                 prebuilt_voice_config=types.PrebuiltVoiceConfig(
                     voice_name="Puck"
                 )
+            )
+        ),
+        # Disable automatic voice-activity detection – we manage turns manually
+        realtime_input_config=types.RealtimeInputConfig(
+            automatic_activity_detection=types.AutomaticActivityDetection(
+                disabled=True
             )
         ),
         system_instruction=types.Content(
@@ -195,9 +217,22 @@ async def live_voice_session(websocket: WebSocket):
 
             # ── Task 2: Receive data from Frontend → Stream to Gemini ─────────
             async def send_to_gemini():
+                keepalive_task = asyncio.create_task(send_keepalive(session))
                 try:
                     while True:
                         msg = await websocket.receive_json()
+
+                        # manual VAD signals from frontend
+                        if msg.get("type") == "activity_start":
+                            await session.send_realtime_input(
+                                activity_start=types.ActivityStart()
+                            )
+                            continue
+                        if msg.get("type") == "activity_end":
+                            await session.send_realtime_input(
+                                activity_end=types.ActivityEnd()
+                            )
+                            continue
 
                         if msg.get("type") != "realtime_input":
                             continue
@@ -230,6 +265,8 @@ async def live_voice_session(websocket: WebSocket):
                     print("[WS] Frontend disconnected (in send_to_gemini).")
                 except Exception as e:
                     print(f"[ERROR] send_to_gemini: {e}")
+                finally:
+                    keepalive_task.cancel()
 
             # Run both tasks concurrently (don't cancel both if one fails)
             await asyncio.gather(

@@ -39,6 +39,9 @@ export default function Home() {
 
   const audioQueueRef = useRef<Float32Array[]>([]);
   const isPlayingRef = useRef(false);
+  // Manual VAD state
+  const isSpeakingRef = useRef(false);
+  const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   // ─── Mic Audio Visualizer ──────────────────────────────────────────────────
   const analyserRef = useRef<AnalyserNode | null>(null);
@@ -464,23 +467,38 @@ export default function Home() {
 
           const float32 = e.inputBuffer.getChannelData(0);
 
-          // Convert Float32 (-1.0 to 1.0) → Int16 PCM (-32768 to 32767)
+          // Simple volume-based VAD
+          const volume = float32.reduce((sum, val) => sum + Math.abs(val), 0) / float32.length;
+          const isVoice = volume > 0.01;
+
+          if (isVoice && !isSpeakingRef.current) {
+            isSpeakingRef.current = true;
+            if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+            ws.send(JSON.stringify({ type: "activity_start" }));
+          }
+
+          if (isVoice) {
+            if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+            silenceTimerRef.current = setTimeout(() => {
+              if (isSpeakingRef.current) {
+                isSpeakingRef.current = false;
+                ws.send(JSON.stringify({ type: "activity_end" }));
+              }
+            }, 1500);
+          }
+
+          // audio encoding as before
           const int16 = new Int16Array(float32.length);
           for (let i = 0; i < float32.length; i++) {
             int16[i] = Math.max(-32768, Math.min(32767, Math.round(float32[i] * 32767)));
           }
-
-          // Convert Int16 buffer → base64 string for JSON transport
           const bytes = new Uint8Array(int16.buffer);
           let binary = "";
           const chunkSize = 8192;
           for (let i = 0; i < bytes.length; i += chunkSize) {
-              binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+            binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
           }
-          ws.send(JSON.stringify({
-            type: "realtime_input",
-            audio: btoa(binary),
-          }));
+          ws.send(JSON.stringify({ type: "realtime_input", audio: btoa(binary) }));
         };
 
         micSource.connect(processor);
