@@ -2,9 +2,31 @@
 
 import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Mic, Activity, History, StopCircle, X, Download, PenTool, Trash2, Type, ChevronRight, Eraser, AlertCircle, WifiOff } from "lucide-react";
+import { 
+  Mic, Activity, History, StopCircle, X, Download, PenTool, 
+  Trash2, Type, ChevronRight, Eraser, AlertCircle, WifiOff,
+  RefreshCw, MessageSquare, Settings 
+} from "lucide-react";
+
+// Types
+interface ChatMessage {
+  role: "user" | "arix";
+  text: string;
+  timestamp?: number;
+}
+
+interface ConversationSummary {
+  session_id: string;
+  message_count: number;
+  summary: string;
+}
 
 export default function Home() {
+  // ─── Session Management ─────────────────────────────────────────────────
+  const [sessionId, setSessionId] = useState<string>("");
+  const [conversationSummary, setConversationSummary] = useState<ConversationSummary | null>(null);
+  
+  // Live Session States
   const [isLive, setIsLive] = useState(false);
   const [showExtensionPopup, setShowExtensionPopup] = useState(false);
   const [showWhiteboard, setShowWhiteboard] = useState(false);
@@ -13,52 +35,73 @@ export default function Home() {
   const [drawColor, setDrawColor] = useState<string>("#1f2937");
   const [textInput, setTextInput] = useState({ visible: false, x: 0, y: 0, value: "" });
   const [isToolbarOpen, setIsToolbarOpen] = useState(false);
-  const [liveError, setLiveError] = useState<string | null>(null); // Session error message
-  const [arixState, setArixState] = useState<"idle" | "listening" | "speaking">("idle");
+  const [liveError, setLiveError] = useState<string | null>(null);
+  const [arixState, setArixState] = useState<"idle" | "listening" | "speaking" | "thinking">("idle");
+  const [connectionState, setConnectionState] = useState<"disconnected" | "connecting" | "connected" | "error">("disconnected");
 
   // Text Chat Mode
   const [showChat, setShowChat] = useState(false);
   const [chatInput, setChatInput] = useState("");
-  const [chatMessages, setChatMessages] = useState<{ role: "user" | "arix"; text: string }[]>([]);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [isChatLoading, setIsChatLoading] = useState(false);
+  const [chatError, setChatError] = useState<string | null>(null);
   const chatWsRef = useRef<WebSocket | null>(null);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
 
   // ─── Audio & WebSocket Refs ────────────────────────────────────────────────
   const wsRef = useRef<WebSocket | null>(null);
-
-  // FIX: Two separate AudioContexts — one for recording (16kHz), one for playback (24kHz)
-  // Gemini Live input expects 16kHz PCM; Gemini output is 24kHz PCM
-  const audioContextRef = useRef<AudioContext | null>(null);       // Playback: 24kHz
-  const recordingContextRef = useRef<AudioContext | null>(null);   // Recording: 16kHz
-
-  // FIX: ScriptProcessorNode replaces MediaRecorder for raw PCM capture
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const recordingContextRef = useRef<AudioContext | null>(null);
   const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
   const micSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
-
   const audioQueueRef = useRef<Float32Array[]>([]);
   const isPlayingRef = useRef(false);
-  // Manual VAD state
   const isSpeakingRef = useRef(false);
   const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const reconnectTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   // ─── Mic Audio Visualizer ──────────────────────────────────────────────────
   const analyserRef = useRef<AnalyserNode | null>(null);
-  const rafRef = useRef<number | null>(null);         // requestAnimationFrame ID
+  const rafRef = useRef<number | null>(null);
   const [micVolume, setMicVolume] = useState<number[]>(Array(20).fill(0));
 
-  // FIX: Refs to avoid stale closures in toggleLive intervals
+  // Whiteboard Refs
   const showWhiteboardRef = useRef(false);
-  const whiteboardDirtyRef = useRef(false); // Only send whiteboard when something changed
-
+  const whiteboardDirtyRef = useRef(false);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
-
-  // FIX: Ref to prevent memory leak in waitForAudio loop
   const waitForAudioActiveRef = useRef(false);
 
-  // FIX: Sync showWhiteboard state to ref — fixes stale closure inside setInterval
+  // ─── Initialize Session ID ────────────────────────────────────────────────
+  useEffect(() => {
+    // Generate or retrieve session ID
+    let stored = localStorage.getItem('arix_session_id');
+    if (!stored) {
+      stored = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      localStorage.setItem('arix_session_id', stored);
+    }
+    setSessionId(stored);
+    
+    // Try to load previous messages from localStorage
+    const savedMessages = localStorage.getItem(`arix_chat_${stored}`);
+    if (savedMessages) {
+      try {
+        setChatMessages(JSON.parse(savedMessages));
+      } catch (e) {
+        console.error("Failed to load saved messages", e);
+      }
+    }
+  }, []);
+
+  // ─── Save messages to localStorage ────────────────────────────────────────
+  useEffect(() => {
+    if (sessionId && chatMessages.length > 0) {
+      localStorage.setItem(`arix_chat_${sessionId}`, JSON.stringify(chatMessages));
+    }
+  }, [chatMessages, sessionId]);
+
+  // Sync showWhiteboard state to ref
   useEffect(() => {
     showWhiteboardRef.current = showWhiteboard;
   }, [showWhiteboard]);
@@ -90,7 +133,7 @@ export default function Home() {
     }
   }, [showWhiteboard]);
 
-  // Update brush settings based on modes
+  // Update brush settings
   useEffect(() => {
     if (ctxRef.current) {
       if (drawMode === "erase") {
@@ -128,7 +171,6 @@ export default function Home() {
     const { offsetX, offsetY } = getCoordinates(e);
     ctxRef.current.lineTo(offsetX, offsetY);
     ctxRef.current.stroke();
-    // FIX: Mark whiteboard as dirty — only send to Gemini when something actually changed
     whiteboardDirtyRef.current = true;
   };
 
@@ -144,7 +186,7 @@ export default function Home() {
       ctxRef.current.font = "bold 24px 'Geist Sans', sans-serif";
       ctxRef.current.fillStyle = drawColor;
       ctxRef.current.fillText(textInput.value, textInput.x, textInput.y + 12);
-      whiteboardDirtyRef.current = true; // Mark dirty after adding text
+      whiteboardDirtyRef.current = true;
     }
     setTextInput({ visible: false, x: 0, y: 0, value: "" });
   };
@@ -175,6 +217,7 @@ export default function Home() {
     }
   };
 
+  // ─── Extension Check ──────────────────────────────────────────────────────
   useEffect(() => {
     const checkExtensionInstalled = () => {
       if (document.documentElement.getAttribute("data-arix-extension-installed") === "true") {
@@ -192,10 +235,9 @@ export default function Home() {
     };
   }, []);
 
-  // Text Chat WebSocket helpers
-  // TTS: Speak text using best available browser voice
+  // ─── TTS Function ─────────────────────────────────────────────────────────
   const speak = (text: string) => {
-    window.speechSynthesis.cancel(); // Stop any current speech
+    window.speechSynthesis.cancel();
 
     const doSpeak = () => {
       const utterance = new SpeechSynthesisUtterance(text);
@@ -203,7 +245,6 @@ export default function Home() {
       utterance.pitch = 1.0;
       utterance.volume = 1.0;
 
-      // Pick the best English voice
       const voices = window.speechSynthesis.getVoices();
       const preferred = voices.find(v =>
         (v.name.includes("Google") || v.name.includes("Microsoft")) &&
@@ -215,7 +256,6 @@ export default function Home() {
       window.speechSynthesis.speak(utterance);
     };
 
-    // Voices may not be loaded yet on first call — wait for them
     if (window.speechSynthesis.getVoices().length === 0) {
       window.speechSynthesis.onvoiceschanged = () => {
         window.speechSynthesis.onvoiceschanged = null;
@@ -226,57 +266,130 @@ export default function Home() {
     }
   };
 
+  // ─── Enhanced Chat Functions ─────────────────────────────────────────────
   const openChat = () => {
     setShowChat(true);
+    setChatError(null);
 
-    // UNLOCK TTS: Chrome needs a user-gesture triggered empty utterance first
+    // Unlock TTS
     const unlock = new SpeechSynthesisUtterance("");
     window.speechSynthesis.speak(unlock);
 
-    if (chatWsRef.current && chatWsRef.current.readyState === WebSocket.OPEN) return;
+    if (chatWsRef.current?.readyState === WebSocket.OPEN) return;
+
     const wsBase = process.env.NEXT_PUBLIC_WS_URL || "wss://arix-backend-103963879704.us-central1.run.app/ws";
-    const ws = new WebSocket(wsBase.replace(/\/*$/, "") + "/chat");
+    const wsUrl = `${wsBase.replace(/\/*$/, "")}/chat?session_id=${sessionId}`;
+    
+    console.log(`[CHAT] Connecting to ${wsUrl}`);
+    const ws = new WebSocket(wsUrl);
     chatWsRef.current = ws;
-    ws.onopen = () => console.log("[CHAT] Connected to backend text chat");
+
+    ws.onopen = () => {
+      console.log("[CHAT] Connected with session:", sessionId);
+      setChatError(null);
+    };
+
     ws.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data);
+        
         if (msg.type === "text_response" && msg.data) {
-          setChatMessages(prev => [...prev, { role: "arix", text: msg.data }]);
+          const newMessage: ChatMessage = {
+            role: "arix",
+            text: msg.data,
+            timestamp: Date.now()
+          };
+          
+          setChatMessages(prev => [...prev, newMessage]);
           setIsChatLoading(false);
-          speak(msg.data); // Speak Arix reply
+          speak(msg.data);
+          
+          // Update conversation summary if available
+          if (msg.conversation_summary) {
+            setConversationSummary({
+              session_id: sessionId,
+              message_count: chatMessages.length + 1,
+              summary: msg.conversation_summary
+            });
+          }
+          
           setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
+        } else if (msg.type === "error") {
+          setChatError(msg.message);
+          setIsChatLoading(false);
         }
-      } catch (e) { console.error(e); }
+      } catch (e) { 
+        console.error("[CHAT] Parse error", e); 
+      }
     };
-    ws.onclose = () => console.log("[CHAT] Disconnected");
-    ws.onerror = (e) => { console.error("[CHAT] Error", e); setIsChatLoading(false); };
+
+    ws.onclose = (event) => {
+      console.log(`[CHAT] Disconnected: ${event.code} ${event.reason}`);
+      if (event.code !== 1000) {
+        setChatError("Connection lost. Try again.");
+      }
+    };
+
+    ws.onerror = (e) => { 
+      console.error("[CHAT] Error", e); 
+      setChatError("Failed to connect to chat server");
+      setIsChatLoading(false); 
+    };
   };
 
   const sendChatMessage = () => {
     const text = chatInput.trim();
     if (!text) return;
+
     if (!chatWsRef.current || chatWsRef.current.readyState !== WebSocket.OPEN) {
       openChat();
       setTimeout(() => sendChatMessage(), 1000);
       return;
     }
-    setChatMessages(prev => [...prev, { role: "user", text }]);
+
+    // Add user message
+    const userMessage: ChatMessage = {
+      role: "user",
+      text,
+      timestamp: Date.now()
+    };
+    
+    setChatMessages(prev => [...prev, userMessage]);
     setChatInput("");
     setIsChatLoading(true);
-    chatWsRef.current.send(JSON.stringify({ text }));
+    setArixState("thinking");
+
+    // Get recent context (last 5 messages)
+    const recentContext = chatMessages.slice(-5).map(m => 
+      `${m.role === "user" ? "Student" : "Arix"}: ${m.text}`
+    ).join("\n");
+
+    // Send with context
+    chatWsRef.current.send(JSON.stringify({ 
+      text,
+      context: recentContext,
+      session_id: sessionId
+    }));
+
     setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
   };
 
-  // Cleanup chat WS on unmount
-  useEffect(() => {
-    return () => { chatWsRef.current?.close(); };
-  }, []);
+  const clearChatHistory = () => {
+    setChatMessages([]);
+    localStorage.removeItem(`arix_chat_${sessionId}`);
+    if (chatWsRef.current?.readyState === WebSocket.OPEN) {
+      chatWsRef.current.close();
+      chatWsRef.current = null;
+    }
+  };
 
-  // ─── Audio Playback (Gemini 24kHz PCM output) ─────────────────────────────
+  // ─── Audio Playback ─────────────────────────────────────────────────────
   const playNextAudioChunk = () => {
     if (!audioContextRef.current || audioQueueRef.current.length === 0) {
       isPlayingRef.current = false;
+      if (arixState === "speaking") {
+        setArixState("listening");
+      }
       return;
     }
 
@@ -299,25 +412,31 @@ export default function Home() {
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
       if (event.data && event.data.type === "ARIX_SCREEN_CAPTURED") {
-        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
           wsRef.current.send(JSON.stringify({
             type: "realtime_input",
             image: event.data.dataUrl,
+            session_id: sessionId
           }));
         }
       }
     };
     window.addEventListener("message", handleMessage);
     return () => window.removeEventListener("message", handleMessage);
-  }, []);
+  }, [sessionId]);
 
   // ─── Stop Live Session ─────────────────────────────────────────────────────
   const stopLiveSession = () => {
     setIsLive(false);
-    setArixState("idle"); // 🔇 Idle
-    waitForAudioActiveRef.current = false; // Stop waitForAudio loop
+    setArixState("idle");
+    setConnectionState("disconnected");
+    waitForAudioActiveRef.current = false;
 
-    // 0. Stop mic visualizer RAF loop
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+
     if (rafRef.current !== null) {
       cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
@@ -325,7 +444,6 @@ export default function Home() {
     analyserRef.current = null;
     setMicVolume(Array(20).fill(0));
 
-    // 1. Disconnect ScriptProcessor (PCM audio capture)
     if (scriptProcessorRef.current) {
       scriptProcessorRef.current.disconnect();
       scriptProcessorRef.current = null;
@@ -335,18 +453,15 @@ export default function Home() {
       micSourceRef.current = null;
     }
 
-    // 2. Stop microphone tracks
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
     }
 
-    // 3. Clear whiteboard capture interval
     if (wsRef.current && (wsRef.current as any).visualCaptureLoop) {
       clearInterval((wsRef.current as any).visualCaptureLoop);
     }
 
-    // 4. Close WebSocket connection
     if (wsRef.current) {
       if (wsRef.current.readyState === WebSocket.OPEN) {
         wsRef.current.close();
@@ -354,13 +469,11 @@ export default function Home() {
       wsRef.current = null;
     }
 
-    // 5. Close recording AudioContext (16kHz)
     if (recordingContextRef.current) {
       recordingContextRef.current.close();
       recordingContextRef.current = null;
     }
 
-    // 6. Close playback AudioContext (24kHz)
     if (audioContextRef.current) {
       audioContextRef.current.close();
       audioContextRef.current = null;
@@ -374,91 +487,84 @@ export default function Home() {
   // ─── Toggle Live Session ───────────────────────────────────────────────────
   const toggleLive = async () => {
     if (isLive) {
-      console.log("Ending Live Voice Session...");
       stopLiveSession();
       return;
     }
 
     try {
-      console.log("Starting Live Voice Session...");
+      setConnectionState("connecting");
+      setLiveError(null);
+      
+      console.log("Starting Live Voice Session with session:", sessionId);
       setIsLive(true);
-      setArixState("listening"); // 🎤 Start listening
+      setArixState("listening");
 
-      // 1. Get microphone access
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
 
-      // 2. Setup Playback AudioContext at 24kHz (Gemini audio output is 24kHz PCM)
       audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({
         sampleRate: 24000,
       });
 
-      // 3. Setup Recording AudioContext at 16kHz (Gemini input expects 16kHz PCM)
       try {
         recordingContextRef.current = new AudioContext({ sampleRate: 16000 });
-        // Resume if suspended (required by browser autoplay policies)
         if (recordingContextRef.current.state === 'suspended') {
           await recordingContextRef.current.resume();
         }
       } catch (error) {
         console.error("[AUDIO] Failed to create recording AudioContext:", error);
         stopLiveSession();
-        setLiveError("🎵 Audio context creation failed. Browser compatibility issue.");
+        setLiveError("Audio context creation failed. Browser compatibility issue.");
         setTimeout(() => setLiveError(null), 6000);
         return;
       }
 
-      // 4. WebSocket — FIX: use env variable instead of hard-coded localhost
-      const wsUrl = process.env.NEXT_PUBLIC_WS_URL || "wss://arix-backend-103963879704.us-central1.run.app/ws/live";
+      const wsBase = process.env.NEXT_PUBLIC_WS_URL || "wss://arix-backend-103963879704.us-central1.run.app/ws";
+      const wsUrl = `${wsBase.replace(/\/*$/, "")}/live?session_id=${sessionId}`;
+      
+      console.log(`[WS] Connecting to ${wsUrl}`);
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
-      // wasConnected flag: backend natively connected da no da check karanna
       let wasConnected = false;
 
       ws.onopen = () => {
         wasConnected = true;
-        setLiveError(null); // Clear any previous error
-        console.log("Connected to Arix Backend.");
+        setConnectionState("connected");
+        setLiveError(null);
+        console.log("Connected to Arix Backend with session:", sessionId);
 
-        // GUARD: recordingContextRef.current null නම් session stop කරනවා (race condition fix)
         const recCtx = recordingContextRef.current;
         if (!recCtx || recCtx.state !== 'running') {
-          console.error("[AUDIO] recordingContextRef is null or not running in ws.onopen — aborting session.");
+          console.error("[AUDIO] recordingContextRef is null or not running");
           stopLiveSession();
-          setLiveError("🎵 Audio context not ready. Try again.");
+          setLiveError("Audio context not ready. Try again.");
           setTimeout(() => setLiveError(null), 6000);
           return;
         }
 
-        // 5. FIX: Use ScriptProcessorNode to capture raw PCM audio
-        //    This replaces MediaRecorder which only captures audio/webm (incompatible with Gemini Live)
         const micSource = recCtx.createMediaStreamSource(stream);
         micSourceRef.current = micSource;
 
-        // ── Analyser Node: Mic volume → Sound Wave Bars ───────────────────
         const analyser = recCtx.createAnalyser();
-        analyser.fftSize = 64;              // 64 FFT → 32 frequency bins
-        analyser.smoothingTimeConstant = 0.75; // Smooth transitions
+        analyser.fftSize = 64;
+        analyser.smoothingTimeConstant = 0.75;
         analyserRef.current = analyser;
-        micSource.connect(analyser);        // mic → analyser (for visualization)
+        micSource.connect(analyser);
 
-        // RAF loop: read frequency data → update micVolume state
         const BAR_COUNT = 20;
-        const dataArray = new Uint8Array(analyser.frequencyBinCount); // 32 bins
+        const dataArray = new Uint8Array(analyser.frequencyBinCount);
         const drawWave = () => {
           rafRef.current = requestAnimationFrame(drawWave);
           analyser.getByteFrequencyData(dataArray);
-          // Map 32 bins → 20 bars (sample evenly)
           const bars = Array.from({ length: BAR_COUNT }, (_, i) => {
             const binIndex = Math.floor(i * (dataArray.length / BAR_COUNT));
-            return dataArray[binIndex] / 255; // 0.0 → 1.0
+            return dataArray[binIndex] / 255;
           });
           setMicVolume(bars);
         };
         drawWave();
 
-        // Buffer: 4096 samples, 1 input channel (mono), 1 output channel
         const processor = recCtx.createScriptProcessor(4096, 1, 1);
         scriptProcessorRef.current = processor;
 
@@ -466,8 +572,6 @@ export default function Home() {
           if (!ws || ws.readyState !== WebSocket.OPEN) return;
 
           const float32 = e.inputBuffer.getChannelData(0);
-
-          // Simple volume-based VAD
           const volume = float32.reduce((sum, val) => sum + Math.abs(val), 0) / float32.length;
           const isVoice = volume > 0.01;
 
@@ -487,7 +591,6 @@ export default function Home() {
             }, 1500);
           }
 
-          // audio encoding as before
           const int16 = new Int16Array(float32.length);
           for (let i = 0; i < float32.length; i++) {
             int16[i] = Math.max(-32768, Math.min(32767, Math.round(float32[i] * 32767)));
@@ -502,22 +605,22 @@ export default function Home() {
         };
 
         micSource.connect(processor);
-        // Must connect to destination to keep processor active (audio is silent here)
         processor.connect(recCtx.destination);
 
-        // 6. Whiteboard capture loop — FIX: only send when content has changed (dirty flag)
         const visualCaptureLoop = setInterval(() => {
           if (!ws || ws.readyState !== WebSocket.OPEN) {
             clearInterval(visualCaptureLoop);
             return;
           }
 
-          // FIX: Use showWhiteboardRef (not showWhiteboard) to avoid stale closure
-          // FIX: Only send if dirty (something was drawn since last send)
           if (showWhiteboardRef.current && canvasRef.current && whiteboardDirtyRef.current) {
             const dataURL = canvasRef.current.toDataURL("image/jpeg", 0.5);
-            ws.send(JSON.stringify({ type: "realtime_input", image: dataURL }));
-            whiteboardDirtyRef.current = false; // Reset dirty after sending
+            ws.send(JSON.stringify({ 
+              type: "realtime_input", 
+              image: dataURL,
+              session_id: sessionId 
+            }));
+            whiteboardDirtyRef.current = false;
           }
         }, 2500);
 
@@ -529,14 +632,13 @@ export default function Home() {
           const msg = JSON.parse(event.data);
 
           if (msg.type === "capture_screen_request") {
-            // Gemini requested screen capture
             if (!showExtensionPopup) {
               window.postMessage({ type: "ARIX_CAPTURE_SCREEN" }, "*");
             }
 
           } else if (msg.type === "audio" && msg.data) {
-            setArixState("speaking"); // 🔊 Arix speaking
-            // Decode base64 PCM from Gemini (24kHz, Int16LE)
+            setArixState("speaking");
+            
             const binaryStr = window.atob(msg.data);
             const length = binaryStr.length;
             const bytes = new Uint8Array(length);
@@ -544,7 +646,6 @@ export default function Home() {
               bytes[i] = binaryStr.charCodeAt(i);
             }
 
-            // Int16LE → Float32
             const int16 = new Int16Array(bytes.buffer);
             const float32 = new Float32Array(int16.length);
             for (let i = 0; i < int16.length; i++) {
@@ -553,10 +654,8 @@ export default function Home() {
 
             audioQueueRef.current.push(float32);
 
-            // KEY FIX: Resume AudioContext if blocked by browser autoplay policy
-            if (audioContextRef.current && audioContextRef.current.state === "suspended") {
+            if (audioContextRef.current?.state === "suspended") {
               await audioContextRef.current.resume();
-              console.log("[AUDIO] AudioContext resumed");
             }
 
             if (!isPlayingRef.current) {
@@ -564,30 +663,27 @@ export default function Home() {
             }
 
           } else if (msg.type === "turn_complete") {
-            console.log("✅ Turn complete — waiting for audio to finish");
+            console.log("✅ Turn complete");
             
-            // ❌ audioQueueRef.current = []; // මේක DELETE කරන්න!
-            // ❌ isPlayingRef.current = false; // මේකත් DELETE!
-            
-            // ✅ Audio finish වෙලා ඉවර වෙන්න wait කරන්න
             waitForAudioActiveRef.current = true;
             const waitForAudio = () => {
-                if (!waitForAudioActiveRef.current) return;
-                if (!isPlayingRef.current && audioQueueRef.current.length === 0) {
-                    console.log("🎤 Audio done — mic now active");
-                    setArixState("listening"); // 🎤 back to listening
-                    if (recordingContextRef.current?.state === 'suspended') {
-                        recordingContextRef.current.resume();
-                    }
-                    waitForAudioActiveRef.current = false;
-                } else {
-                    setTimeout(waitForAudio, 100);
+              if (!waitForAudioActiveRef.current) return;
+              if (!isPlayingRef.current && audioQueueRef.current.length === 0) {
+                setArixState("listening");
+                if (recordingContextRef.current?.state === 'suspended') {
+                  recordingContextRef.current.resume();
                 }
+                waitForAudioActiveRef.current = false;
+              } else {
+                setTimeout(waitForAudio, 100);
+              }
             };
             waitForAudio();
+            
           } else if (msg.type === "live_text" && msg.data) {
-            // Fallback: if text arrives, speak it
             speak(msg.data);
+          } else if (msg.type === "error") {
+            setLiveError(msg.message);
           }
         } catch (e) {
           console.error("Failed to parse incoming message", e);
@@ -596,41 +692,59 @@ export default function Home() {
 
       ws.onclose = (event) => {
         console.log(`[WS] Closed — code: ${event.code}, wasConnected: ${wasConnected}`);
+        setConnectionState("disconnected");
+        
         if ((ws as any).visualCaptureLoop) clearInterval((ws as any).visualCaptureLoop);
+        
         if (!wasConnected) {
-          // Never connected → backend not reachable
           const backendUrl = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000/ws/live";
           if (backendUrl.includes("localhost")) {
-            setLiveError("⚠️ Backend connect වෙන්නේ නෑ! 'cd backend && python main.py' run කරන්න.");
+            setLiveError("⚠️ Backend not running! Run 'cd backend && python main.py'");
           } else {
-            setLiveError("⚠️ Unable to reach deployed backend URL; verify Cloud Run service is up.");
+            setLiveError("⚠️ Unable to reach backend. Check Cloud Run service.");
           }
         } else if (event.code !== 1000) {
-          // Was connected but dropped unexpectedly
-          setLiveError("🔌 Backend connection dropped. Retry කරන්නකෝ.");
+          setLiveError("🔌 Connection lost. Reconnecting...");
+          
+          if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+          reconnectTimerRef.current = setTimeout(() => {
+            if (isLive) {
+              console.log("Attempting to reconnect...");
+              toggleLive();
+            }
+          }, 3000);
         }
+        
         stopLiveSession();
-        // Auto-clear error after 6 seconds
         setTimeout(() => setLiveError(null), 6000);
       };
 
       ws.onerror = () => {
-        console.error("[WS] WebSocket error — backend probably not running on port 8000.");
-        // onclose will also fire after onerror, and will set the error message there
+        console.error("[WS] WebSocket error");
+        setConnectionState("error");
       };
+      
     } catch (err) {
-      console.error("Error accessing microphone or opening WebSocket.", err);
+      console.error("Error accessing microphone:", err);
       stopLiveSession();
-      setLiveError("🎤 Microphone access deny කළා. Browser settings ගාව allow කරන්න.");
+      setLiveError("🎤 Microphone access denied. Allow in browser settings.");
       setTimeout(() => setLiveError(null), 6000);
     }
   };
+
+  // Cleanup chat WS on unmount
+  useEffect(() => {
+    return () => { 
+      chatWsRef.current?.close(); 
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+    };
+  }, []);
 
   // ─── UI / JSX ──────────────────────────────────────────────────────────────
   return (
     <div className="flex flex-col items-center justify-center min-h-screen bg-[#F5F5F7] font-sans relative overflow-hidden">
 
-      {/* Extension Promo Modal popup */}
+      {/* Extension Promo Modal */}
       <AnimatePresence>
         {showExtensionPopup && (
           <motion.div
@@ -646,26 +760,22 @@ export default function Home() {
               transition={{ type: "spring", damping: 25, stiffness: 300 }}
               className="bg-white rounded-4xl shadow-2xl overflow-hidden max-w-sm w-full relative border border-gray-100"
             >
-              {/* Close Button */}
               <button
                 onClick={() => setShowExtensionPopup(false)}
                 className="absolute top-4 right-4 z-10 p-2 bg-black/20 hover:bg-black/40 backdrop-blur-sm text-white rounded-full transition-all"
-                title="Dismiss"
               >
                 <X size={18} strokeWidth={2.5} />
               </button>
 
-              {/* Promo Image */}
               <div className="relative h-56 w-full flex items-center justify-center overflow-hidden bg-linear-to-br from-blue-100 to-purple-100">
                 <img src="/extension_promo.png" alt="Arix Extension Preview" className="w-[110%] h-[110%] object-cover absolute" />
                 <div className="absolute inset-0 bg-linear-to-t from-white via-white/10 to-transparent"></div>
               </div>
 
-              {/* Modal Content */}
               <div className="px-8 pb-8 pt-4 text-center relative z-10 bg-white">
                 <h2 className="text-2xl font-black text-gray-900 mb-2 tracking-tight">Upgrade Your AI Tutor</h2>
                 <p className="text-gray-500 mb-6 text-[15px] leading-relaxed font-medium">
-                  Install the Arix Chrome Extension to seamlessly interact with your screen and talk to your AI tutor anywhere!
+                  Install the Arix Chrome Extension to seamlessly interact with your screen!
                 </p>
 
                 <button
@@ -673,7 +783,7 @@ export default function Home() {
                   className="w-full flex justify-center items-center gap-2 bg-linear-to-r from-[#7ba2e8] to-[#608ee1] text-white py-4 px-6 rounded-2xl font-bold shadow-[0_10px_20px_rgba(123,162,232,0.3)] hover:shadow-[0_15px_25px_rgba(123,162,232,0.4)] hover:-translate-y-1 transition-all"
                 >
                   <Download size={22} className="opacity-90" />
-                  Download Arix Extension
+                  Download Extension
                 </button>
                 <button
                   onClick={() => setShowExtensionPopup(false)}
@@ -691,6 +801,18 @@ export default function Home() {
       <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-blue-400/20 blur-[120px] rounded-full pointer-events-none" />
       <div className="absolute bottom-[-10%] right-[-10%] w-[30%] h-[40%] bg-purple-400/20 blur-[120px] rounded-full pointer-events-none" />
 
+      {/* Session Info */}
+      <motion.div
+        initial={{ opacity: 0, y: -20 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="absolute top-4 left-1/2 transform -translate-x-1/2 bg-white/80 backdrop-blur-md px-4 py-2 rounded-full shadow-sm border border-gray-200/50 z-10 flex items-center gap-2"
+      >
+        <span className="w-2 h-2 rounded-full bg-green-500"></span>
+        <span className="text-xs font-medium text-gray-600">
+          Session: {sessionId.slice(0, 8)}...
+        </span>
+      </motion.div>
+
       {/* History Button */}
       <motion.button
         initial={{ opacity: 0, y: -20 }}
@@ -698,10 +820,11 @@ export default function Home() {
         transition={{ delay: 0.2, duration: 0.5 }}
         whileHover={{ scale: 1.05, y: -2 }}
         whileTap={{ scale: 0.95 }}
+        onClick={() => setShowChat(true)}
         className="absolute top-8 left-8 flex items-center gap-2 bg-white/80 backdrop-blur-md text-gray-800 font-semibold text-sm px-5 py-2.5 rounded-xl shadow-sm border border-gray-200/50 hover:shadow-md transition-all z-10"
       >
-        <History size={18} className="text-gray-600" />
-        History
+        <MessageSquare size={18} className="text-gray-600" />
+        Chat ({chatMessages.length})
       </motion.button>
 
       {/* Open Whiteboard Button */}
@@ -718,7 +841,7 @@ export default function Home() {
         Open Whiteboard
       </motion.button>
 
-      {/* Interactive Whiteboard Modal */}
+      {/* Whiteboard Modal */}
       <AnimatePresence>
         {showWhiteboard && (
           <motion.div
@@ -727,9 +850,7 @@ export default function Home() {
             exit={{ opacity: 0, scale: 0.95 }}
             className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-black/60 backdrop-blur-sm p-6"
           >
-            <div className="bg-white w-full h-full relative flex flex-col items-center justify-start">
-
-              {/* Toolbar */}
+            <div className="bg-white w-full h-full relative flex flex-col items-center justify-start rounded-2xl overflow-hidden">
               <div className="w-full flex justify-between items-center py-4 px-6 bg-white border-b border-gray-100 shadow-sm z-20">
                 <div className="flex items-center gap-3">
                   <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2">
@@ -740,22 +861,16 @@ export default function Home() {
                     Visible to Arix
                   </span>
                 </div>
-
-                <div className="flex gap-3">
-                  <button
-                    onClick={() => { setShowWhiteboard(false); ctxRef.current = null; }}
-                    className="px-4 py-2 bg-gray-100 text-gray-700 flex items-center gap-2 rounded-xl font-semibold hover:bg-gray-200 transition-colors"
-                  >
-                    <X size={16} />
-                    Close Whiteboard
-                  </button>
-                </div>
+                <button
+                  onClick={() => { setShowWhiteboard(false); ctxRef.current = null; }}
+                  className="px-4 py-2 bg-gray-100 text-gray-700 flex items-center gap-2 rounded-xl font-semibold hover:bg-gray-200 transition-colors"
+                >
+                  <X size={16} />
+                  Close
+                </button>
               </div>
 
-              {/* Drawing Canvas Area */}
               <div className="flex-1 w-full bg-gray-50 overflow-hidden relative flex">
-
-                {/* Left Side Expandable Toolbar */}
                 <motion.div
                   initial={false}
                   animate={{ x: isToolbarOpen ? 0 : -80 }}
@@ -763,7 +878,6 @@ export default function Home() {
                   className="absolute left-0 top-1/2 -translate-y-1/2 flex items-center z-30"
                 >
                   <div className="w-20 bg-white rounded-r-3xl shadow-[5px_0_15px_rgba(0,0,0,0.05)] border border-gray-100 p-4 flex flex-col items-center gap-4 py-6">
-                    {/* Tools */}
                     <div className="flex flex-col gap-2 w-full">
                       <button
                         onClick={() => setDrawMode("draw")}
@@ -775,7 +889,7 @@ export default function Home() {
                       <button
                         onClick={() => setDrawMode("text")}
                         className={`p-3 flex justify-center items-center rounded-xl transition-all ${drawMode === "text" ? "bg-blue-100 text-blue-600 shadow-sm" : "text-gray-500 hover:bg-gray-100"}`}
-                        title="Text Box"
+                        title="Text"
                       >
                         <Type size={20} />
                       </button>
@@ -790,7 +904,6 @@ export default function Home() {
 
                     <div className="w-full h-px bg-gray-100 my-1"></div>
 
-                    {/* Colors */}
                     <div className="flex flex-col gap-3 my-2">
                       {["#1f2937", "#ef4444", "#3b82f6", "#10b981", "#f59e0b"].map((color) => (
                         <button
@@ -804,17 +917,15 @@ export default function Home() {
 
                     <div className="w-full h-px bg-gray-100 my-1"></div>
 
-                    {/* Clear Board */}
                     <button
                       onClick={clearBoard}
                       className="p-3 flex justify-center items-center rounded-xl text-red-500 hover:bg-red-50 transition-colors mt-2"
-                      title="Clear Page"
+                      title="Clear"
                     >
                       <Trash2 size={20} />
                     </button>
                   </div>
 
-                  {/* Toggle Handle */}
                   <button
                     onClick={() => setIsToolbarOpen(!isToolbarOpen)}
                     className="absolute -right-10 top-1/2 -translate-y-1/2 bg-white w-10 h-16 rounded-r-2xl shadow-[5px_0_15px_rgba(0,0,0,0.05)] border-y border-r border-gray-100 flex items-center justify-center hover:bg-gray-50 transition-colors"
@@ -847,19 +958,18 @@ export default function Home() {
                         value={textInput.value}
                         onChange={(e) => setTextInput({ ...textInput, value: e.target.value })}
                         onBlur={handleTextSubmit}
-                        placeholder="Type to add text..."
+                        placeholder="Type text..."
                       />
                     </form>
                   )}
                 </div>
               </div>
-
             </div>
           </motion.div>
         )}
       </AnimatePresence>
 
-      {/* Main Content Area */}
+      {/* Main Content */}
       <main className="text-center mb-24 z-10 w-full px-6 flex flex-col items-center justify-center min-h-[45vh]">
         <AnimatePresence mode="wait">
           {!isLive ? (
@@ -872,10 +982,10 @@ export default function Home() {
               className="flex flex-col items-center"
             >
               <h1 className="text-[4.5rem] md:text-[6rem] font-black text-transparent bg-clip-text bg-linear-to-br from-gray-900 via-gray-800 to-gray-600 tracking-tight uppercase leading-[1.1]">
-                Arix AI Is Live
+                Arix AI
               </h1>
               <div className="mt-6 px-4 py-1.5 rounded-full bg-blue-100/50 border border-blue-200 text-blue-800 text-sm font-semibold tracking-wide shadow-sm flex items-center gap-2">
-                ✨ Help Your Education Journey
+                ✨ Your AI Tutor with Memory
               </div>
             </motion.div>
           ) : (
@@ -888,15 +998,12 @@ export default function Home() {
               className="relative flex flex-col items-center justify-center mt-10"
             >
               <div className="relative flex items-center justify-center w-48 h-48 sm:w-64 sm:h-64">
-
-                {/* Outer Glow */}
                 <motion.div
                   animate={{ scale: [1, 1.2, 1], opacity: [0.3, 0.6, 0.3] }}
                   transition={{ duration: 3, repeat: Infinity, ease: "easeInOut" }}
                   className="absolute w-full h-full rounded-full bg-[#7ba2e8] blur-3xl opacity-30"
                 />
 
-                {/* Core Morphing Orb */}
                 <motion.div
                   animate={{
                     borderRadius: [
@@ -910,18 +1017,45 @@ export default function Home() {
                   className="absolute w-44 h-44 bg-linear-to-tr from-[#7ba2e8] via-purple-400 to-[#9cbffc] shadow-[0_0_50px_rgba(123,162,232,0.6)] flex items-center justify-center overflow-hidden"
                 >
                   <div className="absolute inset-0 rounded-full bg-linear-to-b from-white/40 to-transparent" />
+                  
+                  {/* Thinking animation when Arix is processing */}
+                  {arixState === "thinking" && (
+                    <motion.div
+                      animate={{ rotate: 360 }}
+                      transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
+                      className="absolute inset-0 rounded-full border-4 border-white/30 border-t-white/90"
+                    />
+                  )}
+                  
+                  {/* Inner glow */}
+                  <div className="absolute inset-4 rounded-full bg-white/20 blur-md" />
                 </motion.div>
               </div>
 
-              {/* Listening label */}
+              {/* Status label with connection state */}
               <motion.div
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ delay: 0.5 }}
                 className="absolute -bottom-8 text-gray-600 font-semibold tracking-wide flex items-center gap-2 z-10"
               >
-                <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-pulse shadow-[0_0_10px_rgba(239,68,68,0.8)]" />
-                {arixState === "speaking" ? "Arix is speaking..." : "Listening to you..."}
+                <span className={`w-2.5 h-2.5 rounded-full ${
+                  connectionState === "connected" 
+                    ? "bg-green-500 animate-pulse" 
+                    : connectionState === "connecting"
+                    ? "bg-yellow-500 animate-pulse"
+                    : "bg-red-500"
+                } shadow-[0_0_10px_rgba(0,0,0,0.3)]`} />
+                
+                {arixState === "speaking" 
+                  ? "Arix is speaking..." 
+                  : arixState === "thinking"
+                  ? "Arix is thinking..."
+                  : connectionState === "connecting"
+                  ? "Connecting..."
+                  : connectionState === "connected"
+                  ? "Listening to you..."
+                  : "Ready to listen"}
               </motion.div>
             </motion.div>
           )}
@@ -935,7 +1069,6 @@ export default function Home() {
         transition={{ delay: 0.5, duration: 0.7, ease: "easeOut" }}
         className="absolute bottom-8 sm:bottom-12 flex w-[90%] max-w-full sm:max-w-4xl flex-col items-center z-20"
       >
-
         <div className="w-full flex-col flex items-center justify-center gap-6 mt-10">
 
           {/* ── Error Toast ───────────────────────────────────────────────── */}
@@ -960,6 +1093,28 @@ export default function Home() {
             )}
           </AnimatePresence>
 
+          {/* Chat Error Toast */}
+          <AnimatePresence>
+            {chatError && (
+              <motion.div
+                initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: 10, scale: 0.95 }}
+                transition={{ type: "spring", stiffness: 300, damping: 25 }}
+                className="flex items-center gap-3 bg-orange-50 border border-orange-200 text-orange-700 rounded-2xl px-5 py-3 shadow-lg text-sm font-semibold max-w-md w-full"
+              >
+                <AlertCircle size={18} className="shrink-0 text-orange-500" />
+                <span className="flex-1">{chatError}</span>
+                <button
+                  onClick={() => setChatError(null)}
+                  className="shrink-0 p-1 rounded-lg hover:bg-orange-100 transition-colors"
+                >
+                  <X size={14} />
+                </button>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
           {/* Audio Visualizer (Shows only when Live) */}
           <AnimatePresence>
             {isLive && (
@@ -971,18 +1126,24 @@ export default function Home() {
                 style={{ transformOrigin: "bottom" }}
               >
                 {micVolume.map((vol, i) => {
-                  // Mirror effect: make it symmetric around center
                   const center = micVolume.length / 2;
-                  const distFromCenter = Math.abs(i - center) / center; // 0=center, 1=edge
+                  const distFromCenter = Math.abs(i - center) / center;
                   const height = Math.max(4, vol * 56 * (1 - distFromCenter * 0.3));
                   const opacity = 0.4 + vol * 0.6;
+                  
+                  const color = arixState === "speaking" 
+                    ? "from-purple-500 to-pink-500"
+                    : arixState === "thinking"
+                    ? "from-yellow-500 to-orange-500"
+                    : "from-[#7ba2e8] to-[#c4b5fd]";
+                  
                   return (
                     <div
                       key={i}
                       style={{
                         height: `${height}px`,
                         opacity,
-                        background: `linear-gradient(to top, #7ba2e8, #c4b5fd)`,
+                        background: `linear-gradient(to top, ${color.split(' ')[0].replace('from-', '')}, ${color.split(' ')[1].replace('to-', '')})`,
                         transition: "height 60ms ease-out, opacity 60ms ease-out",
                         borderRadius: "9999px",
                         width: "6px",
@@ -1000,10 +1161,14 @@ export default function Home() {
             whileHover={{ scale: 1.05 }}
             whileTap={{ scale: 0.95 }}
             onClick={toggleLive}
-            className={`group relative flex items-center justify-center gap-3 px-10 py-5 rounded-4xl shadow-xl text-xl font-bold tracking-wide transition-all duration-300 overflow-hidden ${isLive
-              ? "bg-red-500 text-white shadow-[#ff4757]/30 ring-4 ring-red-500/20"
-              : "bg-white text-gray-800 hover:text-[#7ba2e8] border-[1.5px] border-gray-200 shadow-[0_10px_30px_rgba(0,0,0,0.05)]"
-              }`}
+            disabled={connectionState === "connecting"}
+            className={`group relative flex items-center justify-center gap-3 px-10 py-5 rounded-4xl shadow-xl text-xl font-bold tracking-wide transition-all duration-300 overflow-hidden ${
+              isLive
+                ? "bg-red-500 text-white shadow-[#ff4757]/30 ring-4 ring-red-500/20"
+                : connectionState === "connecting"
+                ? "bg-gray-400 text-white cursor-not-allowed"
+                : "bg-white text-gray-800 hover:text-[#7ba2e8] border-[1.5px] border-gray-200 shadow-[0_10px_30px_rgba(0,0,0,0.05)]"
+            }`}
           >
             {isLive && (
               <span className="absolute inset-0 bg-red-400 opacity-20 blur-xl animate-pulse"></span>
@@ -1013,6 +1178,11 @@ export default function Home() {
               <>
                 <StopCircle size={28} className="fill-white/20" />
                 <span>Stop Live Session</span>
+              </>
+            ) : connectionState === "connecting" ? (
+              <>
+                <RefreshCw size={28} className="animate-spin" />
+                <span>Connecting...</span>
               </>
             ) : (
               <>
@@ -1028,9 +1198,15 @@ export default function Home() {
           {/* Try Text Chat Button */}
           <button
             onClick={openChat}
-            className="mt-3 text-sm font-semibold text-blue-500 hover:text-blue-600 underline underline-offset-2 transition-colors"
+            className="mt-3 text-sm font-semibold text-blue-500 hover:text-blue-600 underline underline-offset-2 transition-colors flex items-center gap-1"
           >
+            <MessageSquare size={14} />
             Try Text Chat (with Voice)
+            {chatMessages.length > 0 && (
+              <span className="ml-1 px-1.5 py-0.5 bg-blue-100 text-blue-600 rounded-full text-[10px] font-bold">
+                {chatMessages.length}
+              </span>
+            )}
           </button>
         </div>
 
@@ -1038,7 +1214,6 @@ export default function Home() {
         <p className="mt-4 text-xs font-medium text-gray-400 select-none">
           Arix AI can make mistakes. Consider verifying important information.
         </p>
-
       </motion.div>
 
       {/* ── Text Chat Panel ──────────────────────────────────────────────────── */}
@@ -1049,7 +1224,7 @@ export default function Home() {
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 40, scale: 0.97 }}
             transition={{ type: "spring", damping: 25, stiffness: 300 }}
-            className="fixed bottom-6 right-6 w-[95vw] sm:w-95 max-w-sm sm:max-w-none max-h-[85vh] sm:max-h-130 bg-white rounded-3xl shadow-2xl border border-gray-100 flex flex-col overflow-hidden z-50"
+            className="fixed bottom-6 right-6 w-[95vw] sm:w-96 max-h-[85vh] bg-white rounded-3xl shadow-2xl border border-gray-100 flex flex-col overflow-hidden z-50"
           >
             {/* Chat Header */}
             <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 bg-linear-to-r from-blue-50 to-indigo-50">
@@ -1059,36 +1234,67 @@ export default function Home() {
                 </div>
                 <div>
                   <p className="text-sm font-bold text-gray-800">Arix AI</p>
-                  <p className="text-[11px] text-green-500 font-semibold">Speaking enabled</p>
+                  <p className="text-[11px] text-green-500 font-semibold flex items-center gap-1">
+                    <span className={`w-1.5 h-1.5 rounded-full ${
+                      chatWsRef.current?.readyState === WebSocket.OPEN 
+                        ? "bg-green-500 animate-pulse" 
+                        : "bg-gray-400"
+                    }`} />
+                    {chatWsRef.current?.readyState === WebSocket.OPEN ? "Connected" : "Disconnected"}
+                  </p>
                 </div>
               </div>
-              <button
-                onClick={() => setShowChat(false)}
-                className="p-1.5 rounded-full hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors"
-              >
-                <X size={16} />
-              </button>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={clearChatHistory}
+                  className="p-1.5 rounded-full hover:bg-gray-200 text-gray-400 hover:text-gray-600 transition-colors"
+                  title="Clear history"
+                >
+                  <Trash2 size={14} />
+                </button>
+                <button
+                  onClick={() => setShowChat(false)}
+                  className="p-1.5 rounded-full hover:bg-gray-200 text-gray-400 hover:text-gray-600 transition-colors"
+                >
+                  <X size={16} />
+                </button>
+              </div>
             </div>
 
             {/* Messages */}
-            <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3 min-h-50 max-h-85">
+            <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3 min-h-96 max-h-96">
               {chatMessages.length === 0 && (
                 <div className="text-center text-gray-400 text-sm mt-8">
                   <p className="text-2xl mb-2">👋</p>
-                  <p>Ask Arix anything — it will reply in text and speak!</p>
+                  <p>Ask Arix anything — it will remember our conversation!</p>
+                  <p className="text-xs mt-2 text-gray-300">Session: {sessionId.slice(0, 8)}...</p>
                 </div>
               )}
               {chatMessages.map((msg, i) => (
-                <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
+                <motion.div
+                  key={i}
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: i * 0.05 }}
+                  className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
+                >
                   <div
-                    className={`max-w-[80%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${msg.role === "user"
-                      ? "bg-linear-to-r from-blue-500 to-indigo-500 text-white rounded-br-sm"
-                      : "bg-gray-100 text-gray-800 rounded-bl-sm"
-                      }`}
+                    className={`max-w-[80%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
+                      msg.role === "user"
+                        ? "bg-linear-to-r from-blue-500 to-indigo-500 text-white rounded-br-sm"
+                        : "bg-gray-100 text-gray-800 rounded-bl-sm"
+                    }`}
                   >
                     {msg.text}
+                    {msg.timestamp && (
+                      <div className={`text-[10px] mt-1 ${
+                        msg.role === "user" ? "text-blue-100" : "text-gray-400"
+                      }`}>
+                        {new Date(msg.timestamp).toLocaleTimeString()}
+                      </div>
+                    )}
                   </div>
-                </div>
+                </motion.div>
               ))}
               {isChatLoading && (
                 <div className="flex justify-start">
@@ -1116,6 +1322,7 @@ export default function Home() {
                 onKeyDown={e => e.key === "Enter" && sendChatMessage()}
                 placeholder="Ask Arix..."
                 className="flex-1 bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none focus:border-blue-300 focus:ring-2 focus:ring-blue-100 transition-all"
+                disabled={isChatLoading}
               />
               <button
                 onClick={sendChatMessage}
@@ -1125,10 +1332,29 @@ export default function Home() {
                 Send
               </button>
             </div>
+
+            {/* Conversation summary */}
+            {conversationSummary && (
+              <div className="px-4 py-2 border-t border-gray-100 bg-gray-50 text-xs text-gray-500">
+                {conversationSummary.summary}
+              </div>
+            )}
           </motion.div>
         )}
       </AnimatePresence>
 
+      {/* Settings Button (optional) */}
+      <motion.button
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ delay: 0.8 }}
+        className="absolute bottom-4 left-4 p-2 bg-white/80 backdrop-blur-sm rounded-full shadow-sm border border-gray-200/50 hover:bg-white transition-all"
+        onClick={() => {
+          console.log("Settings clicked");
+        }}
+      >
+        <Settings size={18} className="text-gray-600" />
+      </motion.button>
     </div>
   );
 }
