@@ -159,20 +159,10 @@ async def live_voice_session(websocket: WebSocket):
 
                             # Turn-based conversation: After Arix responds, signal ready for next input
                             if getattr(sc, 'turn_complete', False):
-                                print("[ARIX] ✅ Turn complete. Ready for next input.")
+                                print("[ARIX] ✅ Turn complete.")
                                 await websocket.send_json({
                                     "type": "turn_complete",
                                     "ready": True
-                                })
-                                # 🔥 FIX: Send "keep_alive" signal to frontend
-                                await websocket.send_json({
-                                    "type": "keep_streaming",
-                                    "message": "කතා කරන්නකෝ! 🎤"
-                                })
-                                # 🎯 Production Solution: Send continuous streaming signal
-                                await websocket.send_json({
-                                    "type": "continue_streaming",
-                                    "status": "listening"
                                 })
 
                         # ── Handle Tool Calls (screen capture request) ────────
@@ -189,11 +179,13 @@ async def live_voice_session(websocket: WebSocket):
                                     # Immediately send a tool response to unblock Gemini.
                                     # The actual image will arrive via send_realtime_input shortly.
                                     await session.send_tool_response(
-                                        function_responses=types.FunctionResponse(
-                                            name="capture_screen",
-                                            id=fn_call.id,
-                                            response={"status": "capturing_started"},
-                                        )
+                                        function_responses=[
+                                            types.FunctionResponse(
+                                                name="capture_screen",
+                                                id=fn_call.id,
+                                                response={"status": "capturing_started"},
+                                            )
+                                        ]
                                     )
 
                 except WebSocketDisconnect:
@@ -239,8 +231,12 @@ async def live_voice_session(websocket: WebSocket):
                 except Exception as e:
                     print(f"[ERROR] send_to_gemini: {e}")
 
-            # Run both tasks concurrently
-            await asyncio.gather(receive_from_gemini(), send_to_gemini())
+            # Run both tasks concurrently (don't cancel both if one fails)
+            await asyncio.gather(
+                receive_from_gemini(),
+                send_to_gemini(),
+                return_exceptions=True,
+            )
 
     except WebSocketDisconnect:
         print("[WS] Frontend disconnected before session started.")
@@ -272,7 +268,7 @@ async def text_chat_session(websocket: WebSocket):
 
     # Build persistent chat session with history using Vertex AI
     chat = text_client.chats.create(
-        model="gemini-1.5-pro",  # Use Vertex AI model
+        model="gemini-2.0-flash-001",  # Use faster/cheaper Vertex AI model
         config=types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
         )

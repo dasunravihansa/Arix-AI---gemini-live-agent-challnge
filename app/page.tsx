@@ -14,6 +14,7 @@ export default function Home() {
   const [textInput, setTextInput] = useState({ visible: false, x: 0, y: 0, value: "" });
   const [isToolbarOpen, setIsToolbarOpen] = useState(false);
   const [liveError, setLiveError] = useState<string | null>(null); // Session error message
+  const [arixState, setArixState] = useState<"idle" | "listening" | "speaking">("idle");
 
   // Text Chat Mode
   const [showChat, setShowChat] = useState(false);
@@ -50,6 +51,9 @@ export default function Home() {
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
+
+  // FIX: Ref to prevent memory leak in waitForAudio loop
+  const waitForAudioActiveRef = useRef(false);
 
   // FIX: Sync showWhiteboard state to ref — fixes stale closure inside setInterval
   useEffect(() => {
@@ -307,6 +311,8 @@ export default function Home() {
   // ─── Stop Live Session ─────────────────────────────────────────────────────
   const stopLiveSession = () => {
     setIsLive(false);
+    setArixState("idle"); // 🔇 Idle
+    waitForAudioActiveRef.current = false; // Stop waitForAudio loop
 
     // 0. Stop mic visualizer RAF loop
     if (rafRef.current !== null) {
@@ -373,6 +379,7 @@ export default function Home() {
     try {
       console.log("Starting Live Voice Session...");
       setIsLive(true);
+      setArixState("listening"); // 🎤 Start listening
 
       // 1. Get microphone access
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -466,8 +473,10 @@ export default function Home() {
           // Convert Int16 buffer → base64 string for JSON transport
           const bytes = new Uint8Array(int16.buffer);
           let binary = "";
-          for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-
+          const chunkSize = 8192;
+          for (let i = 0; i < bytes.length; i += chunkSize) {
+              binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+          }
           ws.send(JSON.stringify({
             type: "realtime_input",
             audio: btoa(binary),
@@ -508,6 +517,7 @@ export default function Home() {
             }
 
           } else if (msg.type === "audio" && msg.data) {
+            setArixState("speaking"); // 🔊 Arix speaking
             // Decode base64 PCM from Gemini (24kHz, Int16LE)
             const binaryStr = window.atob(msg.data);
             const length = binaryStr.length;
@@ -535,22 +545,28 @@ export default function Home() {
               playNextAudioChunk();
             }
 
-          } else if (msg.type === "continue_streaming") {
-            console.log("[ARIX] Continuous streaming active...");
-            isPlayingRef.current = false; // 🔥 මේක අනිවාර්යයෙන්ම ඕනේ
-            if (recordingContextRef.current && recordingContextRef.current.state !== 'running') {
-              console.warn("[AUDIO] Recording context not running, resuming...");
-              recordingContextRef.current.resume();
-            }
-
-          } else if (msg.type === "keep_streaming") {
-            console.log("[ARIX] Keep streaming audio...");
-            isPlayingRef.current = false; // 🔥 ඒජන්ට් කතා කරලා ඉවරයි කියලා mark කරන්න
-
           } else if (msg.type === "turn_complete") {
-            console.log("✅ Ready for next question");
-            isPlayingRef.current = false; // 🔥 මයික් එකෙන් දත්ත යවන්න ඉඩ දෙන්න
-
+            console.log("✅ Turn complete — waiting for audio to finish");
+            
+            // ❌ audioQueueRef.current = []; // මේක DELETE කරන්න!
+            // ❌ isPlayingRef.current = false; // මේකත් DELETE!
+            
+            // ✅ Audio finish වෙලා ඉවර වෙන්න wait කරන්න
+            waitForAudioActiveRef.current = true;
+            const waitForAudio = () => {
+                if (!waitForAudioActiveRef.current) return;
+                if (!isPlayingRef.current && audioQueueRef.current.length === 0) {
+                    console.log("🎤 Audio done — mic now active");
+                    setArixState("listening"); // 🎤 back to listening
+                    if (recordingContextRef.current?.state === 'suspended') {
+                        recordingContextRef.current.resume();
+                    }
+                    waitForAudioActiveRef.current = false;
+                } else {
+                    setTimeout(waitForAudio, 100);
+                }
+            };
+            waitForAudio();
           } else if (msg.type === "live_text" && msg.data) {
             // Fallback: if text arrives, speak it
             speak(msg.data);
@@ -709,7 +725,7 @@ export default function Home() {
 
                 <div className="flex gap-3">
                   <button
-                    onClick={() => setShowWhiteboard(false)}
+                    onClick={() => { setShowWhiteboard(false); ctxRef.current = null; }}
                     className="px-4 py-2 bg-gray-100 text-gray-700 flex items-center gap-2 rounded-xl font-semibold hover:bg-gray-200 transition-colors"
                   >
                     <X size={16} />
@@ -887,7 +903,7 @@ export default function Home() {
                 className="absolute -bottom-8 text-gray-600 font-semibold tracking-wide flex items-center gap-2 z-10"
               >
                 <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-pulse shadow-[0_0_10px_rgba(239,68,68,0.8)]" />
-                Listening to you...
+                {arixState === "speaking" ? "Arix is speaking..." : "Listening to you..."}
               </motion.div>
             </motion.div>
           )}
