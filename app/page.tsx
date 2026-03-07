@@ -537,7 +537,7 @@ export default function Home() {
 
           } else if (msg.type === "continue_streaming") {
             console.log("[ARIX] Continuous streaming active...");
-            // Ensure mic context is running
+            isPlayingRef.current = false; // 🔥 මේක අනිවාර්යයෙන්ම ඕනේ
             if (recordingContextRef.current && recordingContextRef.current.state !== 'running') {
               console.warn("[AUDIO] Recording context not running, resuming...");
               recordingContextRef.current.resume();
@@ -545,12 +545,11 @@ export default function Home() {
 
           } else if (msg.type === "keep_streaming") {
             console.log("[ARIX] Keep streaming audio...");
-            // Mic processor continues running - no interruption needed
+            isPlayingRef.current = false; // 🔥 ඒජන්ට් කතා කරලා ඉවරයි කියලා mark කරන්න
 
           } else if (msg.type === "turn_complete") {
-            // Backend indicates Gemini finished its reply and is ready for the next user turn
             console.log("✅ Ready for next question");
-            // DON'T stop mic here - just log
+            isPlayingRef.current = false; // 🔥 මයික් එකෙන් දත්ත යවන්න ඉඩ දෙන්න
 
           } else if (msg.type === "live_text" && msg.data) {
             // Fallback: if text arrives, speak it
