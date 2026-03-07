@@ -266,6 +266,17 @@ export default function Home() {
     }
   };
 
+  // ─── Helper function to build WebSocket URL ──────────────────────────────
+  const buildWebSocketUrl = (endpoint: string): string => {
+    const baseUrl = process.env.NEXT_PUBLIC_WS_URL || "https://arix-backend-103963879704.us-central1.run.app";
+    // Remove trailing slashes
+    const cleanBase = baseUrl.replace(/\/+$/, "");
+    // Convert https:// to wss:// (or http:// to ws://)
+    const wsProtocol = cleanBase.startsWith('https') ? 'wss://' : 'ws://';
+    const domain = cleanBase.replace(/^https?:\/\//, '');
+    return `${wsProtocol}${domain}${endpoint}?session_id=${sessionId}`;
+  };
+
   // ─── Enhanced Chat Functions ─────────────────────────────────────────────
   const openChat = () => {
     setShowChat(true);
@@ -277,8 +288,7 @@ export default function Home() {
 
     if (chatWsRef.current?.readyState === WebSocket.OPEN) return;
 
-    const wsBase = process.env.NEXT_PUBLIC_WS_URL || "wss://arix-backend-103963879704.us-central1.run.app/ws";
-    const wsUrl = `${wsBase.replace(/\/*$/, "")}/chat?session_id=${sessionId}`;
+    const wsUrl = buildWebSocketUrl('/chat');
     
     console.log(`[CHAT] Connecting to ${wsUrl}`);
     const ws = new WebSocket(wsUrl);
@@ -519,8 +529,7 @@ export default function Home() {
         return;
       }
 
-      const wsBase = process.env.NEXT_PUBLIC_WS_URL || "wss://arix-backend-103963879704.us-central1.run.app/ws";
-      const wsUrl = `${wsBase.replace(/\/*$/, "")}/live?session_id=${sessionId}`;
+      const wsUrl = buildWebSocketUrl('/ws/live');
       
       console.log(`[WS] Connecting to ${wsUrl}`);
       const ws = new WebSocket(wsUrl);
@@ -697,11 +706,11 @@ export default function Home() {
         if ((ws as any).visualCaptureLoop) clearInterval((ws as any).visualCaptureLoop);
         
         if (!wasConnected) {
-          const backendUrl = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000/ws/live";
-          if (backendUrl.includes("localhost")) {
+          const baseUrl = process.env.NEXT_PUBLIC_WS_URL || "https://arix-backend-103963879704.us-central1.run.app";
+          if (baseUrl.includes("localhost")) {
             setLiveError("⚠️ Backend not running! Run 'cd backend && python main.py'");
           } else {
-            setLiveError("⚠️ Unable to reach backend. Check Cloud Run service.");
+            setLiveError("⚠️ Unable to reach backend. Check if Cloud Run service is running");
           }
         } else if (event.code !== 1000) {
           setLiveError("🔌 Connection lost. Reconnecting...");
