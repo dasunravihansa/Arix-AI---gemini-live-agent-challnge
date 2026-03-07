@@ -128,16 +128,17 @@ def get_dynamic_system_prompt(conversation: ConversationManager = None) -> str:
 
 # ─── Keepalive — 25s interval (10s was too aggressive) ───────────────────────
 async def send_keepalive(session):
+    # Send silence every 8s to prevent Gemini idle timeout (which is ~30s)
     silence = b'\x00\x00' * 1600  # 100ms silence at 16kHz
     while True:
-        await asyncio.sleep(25)  # FIX: 10s → 25s
+        await asyncio.sleep(8)
         try:
             await session.send_realtime_input(
                 audio=types.Blob(data=silence, mime_type="audio/pcm;rate=16000")
             )
-            print("[KEEPALIVE] Sent silent audio")
+            print("[KEEPALIVE] ✅ Sent silent audio")
         except Exception as e:
-            print(f"[KEEPALIVE] Error: {e}")
+            print(f"[KEEPALIVE] ❌ Error: {e}")
             break
 
 
@@ -264,9 +265,11 @@ async def live_voice_session(websocket: WebSocket):
                         msg = await websocket.receive_json()
 
                         if msg.get("type") == "activity_start":
+                            print(f"[VAD] ✅ activity_start received → sending to Gemini | {session_id}")
                             await session.send_realtime_input(activity_start=types.ActivityStart())
                             continue
                         if msg.get("type") == "activity_end":
+                            print(f"[VAD] ✅ activity_end received → sending to Gemini | {session_id}")
                             await session.send_realtime_input(activity_end=types.ActivityEnd())
                             continue
                         if msg.get("type") != "realtime_input":
