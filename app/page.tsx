@@ -46,8 +46,10 @@ export default function Home() {
   const streamRef = useRef<MediaStream | null>(null);
   const audioQueueRef = useRef<Float32Array[]>([]);
   const isPlayingRef = useRef(false);
+  
+  // VAD State
   const isSpeakingRef = useRef(false);
-  const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const activityEndTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   // Visualizer
   const analyserRef = useRef<AnalyserNode | null>(null);
@@ -165,7 +167,6 @@ export default function Home() {
     if (chatWsRef.current?.readyState === WebSocket.OPEN) return;
 
     const sessionId = getSessionId();
-    // FIX: correct path /ws/chat (was /chat before — caused 403)
     const wsBase = process.env.NEXT_PUBLIC_WS_URL || "wss://arix-backend-103963879704.us-central1.run.app";
     const wsUrl = `${wsBase.replace(/\/ws\/.*$/, "").replace(/\/$/, "")}/ws/chat?session_id=${sessionId}`;
     console.log("[CHAT] Connecting to:", wsUrl);
@@ -238,7 +239,7 @@ export default function Home() {
     if (rafRef.current !== null) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
     analyserRef.current = null; setMicVolume(Array(20).fill(0));
 
-    if (silenceTimerRef.current) { clearTimeout(silenceTimerRef.current); silenceTimerRef.current = null; }
+    if (activityEndTimerRef.current) { clearTimeout(activityEndTimerRef.current); activityEndTimerRef.current = null; }
     isSpeakingRef.current = false;
 
     scriptProcessorRef.current?.disconnect(); scriptProcessorRef.current = null;
@@ -315,33 +316,39 @@ export default function Home() {
 
         processor.onaudioprocess = (e) => {
           if (!ws || ws.readyState !== WebSocket.OPEN) return;
-          // FIX: block mic when Arix speaking
-          if (arixStateRef.current === "speaking") {
-            console.log("🔴 MIC BLOCKED — Arix speaking");
-            return;
-          }
+          
+          // Block mic when Arix speaking to prevent echo/interruptions
+          if (arixStateRef.current === "speaking") return;
 
           const float32 = e.inputBuffer.getChannelData(0);
-          const vol = float32.reduce((s, v) => s + Math.abs(v), 0) / float32.length;
-          const isVoice = vol > 0.01;
+          
+          // Volume detect function
+          const volume = float32.reduce((s, v) => s + Math.abs(v), 0) / float32.length;
 
-          if (isVoice && !isSpeakingRef.current) {
-            isSpeakingRef.current = true;
-            if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-            console.log("🎙️ activity_start sent | arixState:", arixStateRef.current);
+          if (volume > 0.01 && !isSpeakingRef.current) {
             ws.send(JSON.stringify({ type: "activity_start" }));
-          }
-          if (isVoice) {
-            if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-            silenceTimerRef.current = setTimeout(() => {
-              if (isSpeakingRef.current) {
+            isSpeakingRef.current = true;
+            if (activityEndTimerRef.current) {
+              clearTimeout(activityEndTimerRef.current);
+              activityEndTimerRef.current = null;
+            }
+          } else if (volume < 0.005 && isSpeakingRef.current) {
+            if (!activityEndTimerRef.current) {
+              activityEndTimerRef.current = setTimeout(() => {
+                if (ws.readyState === WebSocket.OPEN) {
+                  ws.send(JSON.stringify({ type: "activity_end" }));
+                }
                 isSpeakingRef.current = false;
-                console.log("🔇 activity_end sent");
-                ws.send(JSON.stringify({ type: "activity_end" }));
-              }
-            }, 1500);
+                activityEndTimerRef.current = null;
+              }, 300); // Debounce 300ms
+            }
+          } else if (volume >= 0.005 && activityEndTimerRef.current) {
+             // Cancel debounce if user starts speaking again
+             clearTimeout(activityEndTimerRef.current);
+             activityEndTimerRef.current = null;
           }
 
+          // Audio encoding
           const int16 = new Int16Array(float32.length);
           for (let i = 0; i < float32.length; i++)
             int16[i] = Math.max(-32768, Math.min(32767, Math.round(float32[i] * 32767)));
@@ -349,6 +356,7 @@ export default function Home() {
           let binary = "";
           for (let i = 0; i < bytes.length; i += 8192)
             binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
+          
           ws.send(JSON.stringify({ type: "realtime_input", audio: btoa(binary) }));
         };
 
@@ -370,7 +378,6 @@ export default function Home() {
           if (msg.type === "capture_screen_request") {
             if (!showExtensionPopup) window.postMessage({ type: "ARIX_CAPTURE_SCREEN" }, "*");
           } else if (msg.type === "audio" && msg.data) {
-            console.log("🔊 Audio chunk received — setting arixState=speaking");
             setArixState("speaking"); arixStateRef.current = "speaking";
             const bytes = new Uint8Array([...window.atob(msg.data)].map(c => c.charCodeAt(0)));
             const int16 = new Int16Array(bytes.buffer);
@@ -380,15 +387,18 @@ export default function Home() {
             if (audioContextRef.current?.state === "suspended") await audioContextRef.current.resume();
             if (!isPlayingRef.current) playNextAudioChunk();
           } else if (msg.type === "turn_complete") {
-            console.log("✅ Turn complete — waiting for audio to finish");
+            console.log("🎤 Ready - mic continues");
+            isSpeakingRef.current = false; // Reset for next speech
+            if (activityEndTimerRef.current) {
+              clearTimeout(activityEndTimerRef.current);
+              activityEndTimerRef.current = null;
+            }
+
             waitForAudioActiveRef.current = true;
             const wait = () => {
               if (!waitForAudioActiveRef.current) return;
               if (!isPlayingRef.current && !audioQueueRef.current.length) {
-                console.log("🎤 Audio done — mic now active | setting arixState=listening");
                 setArixState("listening"); arixStateRef.current = "listening";
-                isSpeakingRef.current = false;
-                if (silenceTimerRef.current) { clearTimeout(silenceTimerRef.current); silenceTimerRef.current = null; }
                 if (recordingContextRef.current?.state === "suspended") recordingContextRef.current.resume();
                 waitForAudioActiveRef.current = false;
               } else setTimeout(wait, 100);
@@ -408,19 +418,14 @@ export default function Home() {
           stopLiveSession();
           setTimeout(() => setLiveError(null), 6000);
         } else if (event.code === 1000) {
-          // Normal close — user stopped
           stopLiveSession();
         } else {
-          // Unexpected drop — auto reconnect!
           console.log("🔄 Session dropped — auto reconnecting in 1s...");
           wsRef.current = null;
-          // Clean up old ws resources but keep mic/audio alive
           if (scriptProcessorRef.current) { scriptProcessorRef.current.disconnect(); scriptProcessorRef.current = null; }
           if (micSourceRef.current) { micSourceRef.current.disconnect(); micSourceRef.current = null; }
           setTimeout(() => {
             if (isLive) {
-              console.log("🔄 Reconnecting now...");
-              // Re-setup WS + processor using existing stream
               const existingStream = streamRef.current;
               if (!existingStream) { stopLiveSession(); return; }
 
@@ -431,7 +436,6 @@ export default function Home() {
 
               ws2.onopen = () => {
                 wasConnected2 = true;
-                console.log("🔄 Reconnected!");
                 setArixState("listening"); arixStateRef.current = "listening";
 
                 const recCtx = recordingContextRef.current;
@@ -445,23 +449,32 @@ export default function Home() {
                 processor2.onaudioprocess = (e) => {
                   if (!ws2 || ws2.readyState !== WebSocket.OPEN) return;
                   if (arixStateRef.current === "speaking") return;
+                  
                   const float32 = e.inputBuffer.getChannelData(0);
-                  const vol = float32.reduce((s, v) => s + Math.abs(v), 0) / float32.length;
-                  const isVoice = vol > 0.01;
-                  if (isVoice && !isSpeakingRef.current) {
-                    isSpeakingRef.current = true;
-                    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+                  const volume = float32.reduce((s, v) => s + Math.abs(v), 0) / float32.length;
+
+                  if (volume > 0.01 && !isSpeakingRef.current) {
                     ws2.send(JSON.stringify({ type: "activity_start" }));
-                  }
-                  if (isVoice) {
-                    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-                    silenceTimerRef.current = setTimeout(() => {
-                      if (isSpeakingRef.current) {
+                    isSpeakingRef.current = true;
+                    if (activityEndTimerRef.current) {
+                      clearTimeout(activityEndTimerRef.current);
+                      activityEndTimerRef.current = null;
+                    }
+                  } else if (volume < 0.005 && isSpeakingRef.current) {
+                    if (!activityEndTimerRef.current) {
+                      activityEndTimerRef.current = setTimeout(() => {
+                        if (ws2.readyState === WebSocket.OPEN) {
+                          ws2.send(JSON.stringify({ type: "activity_end" }));
+                        }
                         isSpeakingRef.current = false;
-                        ws2.send(JSON.stringify({ type: "activity_end" }));
-                      }
-                    }, 1500);
+                        activityEndTimerRef.current = null;
+                      }, 300);
+                    }
+                  } else if (volume >= 0.005 && activityEndTimerRef.current) {
+                     clearTimeout(activityEndTimerRef.current);
+                     activityEndTimerRef.current = null;
                   }
+
                   const int16 = new Int16Array(float32.length);
                   for (let i = 0; i < float32.length; i++)
                     int16[i] = Math.max(-32768, Math.min(32767, Math.round(float32[i] * 32767)));
@@ -477,10 +490,6 @@ export default function Home() {
 
               ws2.onmessage = ws.onmessage;
               ws2.onclose = (e2) => {
-                console.log(`[WS2] Closed — code: ${e2.code}`);
-                if (e2.code !== 1000 && wasConnected2) {
-                  console.log("🔄 Second reconnect attempt...");
-                }
                 stopLiveSession();
               };
               ws2.onerror = () => console.error("[WS2] error");

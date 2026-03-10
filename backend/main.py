@@ -152,7 +152,14 @@ def build_config(conversation: ConversationManager = None) -> types.LiveConnectC
             )
         ),
         realtime_input_config=types.RealtimeInputConfig(
-            automatic_activity_detection=types.AutomaticActivityDetection(disabled=True)
+            automatic_activity_detection=types.AutomaticActivityDetection(
+                vad_config=types.VadConfig(
+                    start_sensitivity="START_SENSITIVITY_MEDIUM",
+                    end_sensitivity="END_SENSITIVITY_MEDIUM",
+                    prefix_padding_ms=200,
+                    silence_duration_ms=400
+                )
+            )
         ),
         system_instruction=types.Content(
             parts=[types.Part.from_text(text=get_dynamic_system_prompt(conversation))]
@@ -180,6 +187,27 @@ def get_conversation(session_id: str = None) -> ConversationManager:
             oldest = sorted(active_conversations.keys())[0]
             del active_conversations[oldest]
     return active_conversations[session_id]
+
+
+# ─── Live Session Store (prepare for persistent Gemini Live sessions) -----
+class ChatSessionStore:
+    """A lightweight store to centralize creation of Gemini Live session
+    context managers per session_id. This currently returns a fresh
+    `live.connect(...)` async context manager but centralizes the
+    creation point so we can later implement true reuse/pooling.
+    """
+    def __init__(self):
+        self.sessions = {}  # session_id -> metadata (placeholder)
+
+    async def get_or_create_session(self, session_id: str, model: str, config: types.LiveConnectConfig):
+        # NOTE: returning the async context manager from the client.
+        # Future improvements: actually open and cache a live session
+        # instance that can be reused across websocket reconnects.
+        self.sessions.setdefault(session_id, {"created": datetime.now().isoformat()})
+        return live_client.aio.live.connect(model=model, config=config)
+
+
+session_store = ChatSessionStore()
 
 
 # ─── Health Check ─────────────────────────────────────────────────────────────
@@ -212,7 +240,9 @@ async def live_voice_session(websocket: WebSocket):
 
     try:
         config = build_config(conversation)
-        async with live_client.aio.live.connect(model=MODEL, config=config) as session:
+        # Obtain an async context manager for the Gemini Live session from the session_store.
+        session_ctx = await session_store.get_or_create_session(session_id, MODEL, config)
+        async with session_ctx as session:
             print(f"[GEMINI] Live session started [{MODEL}] | {session_id}")
             conversation.add_system_message("Live session started")
 
