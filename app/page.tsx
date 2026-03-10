@@ -645,6 +645,15 @@ export default function Home() {
         <PenTool size={18} /> Open Whiteboard
       </motion.button>
 
+      {/* Center Top — Branding Badges */}
+      <motion.div initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.25 }}
+        className="absolute top-7 left-1/2 -translate-x-1/2 flex flex-col items-center gap-1.5 z-10 pointer-events-none">
+        <div className="flex items-center gap-2 px-4 py-1.5 rounded-full bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 text-green-800 text-[10px] font-bold tracking-widest uppercase shadow-sm whitespace-nowrap">
+          <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse shadow-[0_0_6px_rgba(34,197,94,0.8)]" />
+          🔇 Inbuilt Noise Cancelling System
+        </div>
+      </motion.div>
+
       {/* Whiteboard */}
       <AnimatePresence>
         {showWhiteboard && (
@@ -715,12 +724,8 @@ export default function Home() {
                 Arix AI
               </h1>
               <div className="mt-5 flex flex-col items-center gap-3">
-                <div className="flex items-center gap-2 px-5 py-2 rounded-full bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 text-green-800 text-xs font-bold tracking-widest uppercase shadow-sm">
-                  <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse shadow-[0_0_6px_rgba(34,197,94,0.8)]" />
-                  🔇 Inbuilt Noise Cancelling System
-                </div>
                 <div className="flex items-center gap-2 px-4 py-1.5 rounded-full bg-blue-100/50 border border-blue-200 text-blue-800 text-sm font-semibold">
-                  🧠 Your AI Tutor with Memory
+                  𝖸𝖮𝖴𝖱 𝖠𝖨 𝖳𝖴𝖳𝖮𝖱 𝖶𝖨𝖳𝖧 𝖬𝖤𝖬𝖮𝖱𝖸
                 </div>
               </div>
             </motion.div>
