@@ -143,6 +143,7 @@ async def send_keepalive(session):
 
 
 # ─── Live Config ──────────────────────────────────────────────────────────────
+# ─── Live Config ──────────────────────────────────────────────────────────────
 def build_config(conversation: ConversationManager = None) -> types.LiveConnectConfig:
     return types.LiveConnectConfig(
         response_modalities=["AUDIO"],
@@ -152,14 +153,8 @@ def build_config(conversation: ConversationManager = None) -> types.LiveConnectC
             )
         ),
         realtime_input_config=types.RealtimeInputConfig(
-            automatic_activity_detection=types.AutomaticActivityDetection(
-                vad_config=types.VadConfig(
-                    start_sensitivity="START_SENSITIVITY_MEDIUM",
-                    end_sensitivity="END_SENSITIVITY_MEDIUM",
-                    prefix_padding_ms=200,
-                    silence_duration_ms=400
-                )
-            )
+            # Auto VAD මෙතනින් Disable කරන්න
+            automatic_activity_detection=types.AutomaticActivityDetection(disabled=True) 
         ),
         system_instruction=types.Content(
             parts=[types.Part.from_text(text=get_dynamic_system_prompt(conversation))]
@@ -175,7 +170,6 @@ def build_config(conversation: ConversationManager = None) -> types.LiveConnectC
             )
         ],
     )
-
 
 # ─── Conversation Helper ──────────────────────────────────────────────────────
 def get_conversation(session_id: str = None) -> ConversationManager:
