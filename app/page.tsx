@@ -28,6 +28,33 @@ export default function Home() {
   const [arixState, setArixState] = useState<"idle" | "listening" | "speaking">("idle");
   const arixStateRef = useRef<"idle" | "listening" | "speaking">("idle");
 
+  // Conversation History
+  interface ConversationMessage {
+    role: "user" | "arix";
+    text: string;
+    timestamp: number;
+  }
+  const [conversationHistory, setConversationHistory] = useState<ConversationMessage[]>([]);
+
+  // Load history from localStorage on mount
+  useEffect(() => {
+    const saved = localStorage.getItem(`arix_history_${getSessionId()}`);
+    if (saved) {
+      try {
+        setConversationHistory(JSON.parse(saved));
+      } catch (e) {
+        console.error("Failed to load history", e);
+      }
+    }
+  }, []);
+
+  // Save history when updated
+  useEffect(() => {
+    if (conversationHistory.length > 0) {
+      localStorage.setItem(`arix_history_${getSessionId()}`, JSON.stringify(conversationHistory));
+    }
+  }, [conversationHistory]);
+
   // Text Chat
   const [showChat, setShowChat] = useState(false);
   const [chatInput, setChatInput] = useState("");
@@ -178,6 +205,7 @@ export default function Home() {
         const msg = JSON.parse(event.data);
         if (msg.type === "text_response" && msg.data) {
           setChatMessages(prev => [...prev, { role: "arix", text: msg.data }]);
+          setConversationHistory(prev => [...prev, { role: "arix", text: msg.data, timestamp: Date.now() }]);
           setChatMessageCount(c => c + 1);
           setIsChatLoading(false);
           speak(msg.data);
@@ -196,6 +224,7 @@ export default function Home() {
       openChat(); setTimeout(() => sendChatMessage(), 1000); return;
     }
     setChatMessages(prev => [...prev, { role: "user", text }]);
+    setConversationHistory(prev => [...prev, { role: "user", text, timestamp: Date.now() }]);
     setChatMessageCount(c => c + 1);
     setChatInput(""); setIsChatLoading(true);
     chatWsRef.current.send(JSON.stringify({ text }));
@@ -289,6 +318,24 @@ export default function Home() {
       ws.onopen = () => {
         wasConnected = true; setLiveError(null);
         console.log(`Connected to Arix Backend with session: ${sessionId}`);
+
+        // Read latest history state
+        let currentHistory = conversationHistory;
+        if (currentHistory.length === 0) {
+          const saved = localStorage.getItem(`arix_history_${sessionId}`);
+          if (saved) { try { currentHistory = JSON.parse(saved); } catch(e){} }
+        }
+
+        // Send conversation history as context
+        if (currentHistory.length > 0) {
+          const lastFew = currentHistory.slice(-5);
+          const contextMsg = lastFew.map(m => `${m.role === 'user' ? 'User' : 'Arix'}: ${m.text}`).join('\n');
+          console.log("📨 Sending previous context to backend...");
+          ws.send(JSON.stringify({
+            type: "realtime_input",
+            text: `[CONTEXT - Previous conversation]:\n${contextMsg}\n\nContinue from here:`
+          }));
+        }
 
         const recCtx = recordingContextRef.current;
         if (!recCtx || recCtx.state !== "running") {
@@ -395,6 +442,7 @@ export default function Home() {
             };
             wait();
           } else if (msg.type === "live_text" && msg.data) {
+            setConversationHistory(prev => [...prev, { role: "arix", text: msg.data, timestamp: Date.now() }]);
             speak(msg.data);
           }
         } catch (e) { console.error("Message parse error", e); }
@@ -433,6 +481,21 @@ export default function Home() {
                 wasConnected2 = true;
                 console.log("🔄 Reconnected!");
                 setArixState("listening"); arixStateRef.current = "listening";
+
+                // Read latest history state from local storage or closure
+                let currentHistory = conversationHistory;
+                const saved = localStorage.getItem(`arix_history_${sessionId}`);
+                if (saved) { try { currentHistory = JSON.parse(saved); } catch(e){} }
+
+                if (currentHistory.length > 0) {
+                  const lastFew = currentHistory.slice(-5);
+                  const contextMsg = lastFew.map(m => `${m.role === 'user' ? 'User' : 'Arix'}: ${m.text}`).join('\n');
+                  console.log("📨 Sending recovered context during reconnect...");
+                  ws2.send(JSON.stringify({
+                    type: "realtime_input",
+                    text: `[CONTEXT - Recovered after disconnected]:\n${contextMsg}\n\nContinue seamlessly:`
+                  }));
+                }
 
                 const recCtx = recordingContextRef.current;
                 if (!recCtx) return;

@@ -203,7 +203,10 @@ async def live_voice_session(websocket: WebSocket):
 
     session_id = websocket.query_params.get("session_id", f"live_{datetime.now().timestamp()}")
     conversation = get_conversation(session_id)
-    print(f"[WS] Connected | Session: {session_id}")
+    print(f"[SESSION] Started | ID: {session_id}")
+
+    # Track messages
+    message_counter = 0
 
     if not live_client or not MODEL:
         await websocket.send_json({"type": "error", "message": "Live API unavailable."})
@@ -217,6 +220,7 @@ async def live_voice_session(websocket: WebSocket):
             conversation.add_system_message("Live session started")
 
             async def receive_from_gemini():
+                nonlocal message_counter
                 try:
                     async for response in session.receive():
                         if response.server_content:
@@ -232,7 +236,8 @@ async def live_voice_session(websocket: WebSocket):
                                             "mime_type": part.inline_data.mime_type or "audio/pcm",
                                         })
                                     elif part.text:
-                                        print(f"[TEXT] Gemini: {part.text[:80]}")
+                                        message_counter += 1
+                                        print(f"[SESSION:{session_id}] Message #{message_counter}: {part.text[:80]}")
                                         conversation.add_assistant_message(part.text)
                                         await websocket.send_json({"type": "live_text", "data": part.text})
 
@@ -289,6 +294,15 @@ async def live_voice_session(websocket: WebSocket):
                                 media=types.Blob(data=img_bytes, mime_type="image/jpeg")
                             )
                             conversation.add_user_message("[Sent whiteboard image]", "image")
+                        if "text" in msg:
+                            # Context injection into live session
+                            text_ctx = msg["text"]
+                            print(f"[TEXT IN] Injecting text/context to Gemini: {text_ctx[:80]}...")
+                            try:
+                                await session.send(input=text_ctx)
+                                conversation.add_user_message(text_ctx, "text")
+                            except Exception as e:
+                                print(f"[ERROR] sending text context: {e}")
 
                 except WebSocketDisconnect:
                     print(f"[WS] Disconnected in send_to_gemini | {session_id}")
