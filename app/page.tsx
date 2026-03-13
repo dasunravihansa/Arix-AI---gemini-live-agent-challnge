@@ -46,10 +46,8 @@ export default function Home() {
   const streamRef = useRef<MediaStream | null>(null);
   const audioQueueRef = useRef<Float32Array[]>([]);
   const isPlayingRef = useRef(false);
-
-  // VAD State
   const isSpeakingRef = useRef(false);
-  const activityEndTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   // Visualizer
   const analyserRef = useRef<AnalyserNode | null>(null);
@@ -61,14 +59,6 @@ export default function Home() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
   const waitForAudioActiveRef = useRef(false);
-
-  // ─── Noise Cancellation Refs ──────────────────────────────────────────────
-  const highpassFilterRef = useRef<BiquadFilterNode | null>(null);
-  const lowpassFilterRef = useRef<BiquadFilterNode | null>(null);
-  const compressorRef = useRef<DynamicsCompressorNode | null>(null);
-  const noiseFloorRef = useRef<number>(0.005);
-  const calibrationSamplesRef = useRef<number[]>([]);
-  const [ncStatus, setNcStatus] = useState<"idle" | "calibrating" | "active">("idle");
 
   useEffect(() => { showWhiteboardRef.current = showWhiteboard; }, [showWhiteboard]);
 
@@ -175,6 +165,7 @@ export default function Home() {
     if (chatWsRef.current?.readyState === WebSocket.OPEN) return;
 
     const sessionId = getSessionId();
+    // FIX: correct path /ws/chat (was /chat before — caused 403)
     const wsBase = process.env.NEXT_PUBLIC_WS_URL || "wss://arix-backend-103963879704.us-central1.run.app";
     const wsUrl = `${wsBase.replace(/\/ws\/.*$/, "").replace(/\/$/, "")}/ws/chat?session_id=${sessionId}`;
     console.log("[CHAT] Connecting to:", wsUrl);
@@ -247,17 +238,12 @@ export default function Home() {
     if (rafRef.current !== null) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
     analyserRef.current = null; setMicVolume(Array(20).fill(0));
 
-    if (activityEndTimerRef.current) { clearTimeout(activityEndTimerRef.current); activityEndTimerRef.current = null; }
+    if (silenceTimerRef.current) { clearTimeout(silenceTimerRef.current); silenceTimerRef.current = null; }
     isSpeakingRef.current = false;
 
-    compressorRef.current?.disconnect(); compressorRef.current = null;
-    lowpassFilterRef.current?.disconnect(); lowpassFilterRef.current = null;
-    highpassFilterRef.current?.disconnect(); highpassFilterRef.current = null;
     scriptProcessorRef.current?.disconnect(); scriptProcessorRef.current = null;
     micSourceRef.current?.disconnect(); micSourceRef.current = null;
     streamRef.current?.getTracks().forEach(t => t.stop()); streamRef.current = null;
-    calibrationSamplesRef.current = [];
-    setNcStatus("idle");
 
     if (wsRef.current) {
       if ((wsRef.current as any).visualCaptureLoop) clearInterval((wsRef.current as any).visualCaptureLoop);
@@ -279,14 +265,7 @@ export default function Home() {
       console.log("Starting Live Voice Session...");
       setIsLive(true); setArixState("listening"); arixStateRef.current = "listening";
 
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: false,
-          channelCount: 1,
-        }
-      });
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
 
       audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
@@ -319,39 +298,9 @@ export default function Home() {
         const micSource = recCtx.createMediaStreamSource(stream);
         micSourceRef.current = micSource;
 
-        // ─── Stage 1: Highpass Filter — 100Hz ට අඩු rumble/HVAC/vehicle noise ────
-        const highpass = recCtx.createBiquadFilter();
-        highpass.type = "highpass";
-        highpass.frequency.value = 100; // fan/vehicle noise cut
-        highpass.Q.value = 1;
-        highpassFilterRef.current = highpass;
-
-        // ─── Stage 2: Lowpass Filter — 4kHz ට වැඩි hiss/air noise block ──────────
-        const lowpass = recCtx.createBiquadFilter();
-        lowpass.type = "lowpass";
-        lowpass.frequency.value = 4000; // human voice range: 300Hz-3400Hz
-        lowpass.Q.value = 1;
-        lowpassFilterRef.current = lowpass;
-
-        // ─── Stage 3: Dynamics Compressor — voice level normalize ────────────────
-        const compressor = recCtx.createDynamicsCompressor();
-        compressor.threshold.value = -25;  // -25dB මත compress start
-        compressor.knee.value = 30;        // smooth knee
-        compressor.ratio.value = 12;       // 12:1 compression ratio
-        compressor.attack.value = 0.003;   // 3ms fast attack
-        compressor.release.value = 0.25;   // 250ms release
-        compressorRef.current = compressor;
-
-        // Chain: mic → highpass → lowpass → compressor
-        micSource.connect(highpass);
-        highpass.connect(lowpass);
-        lowpass.connect(compressor);
-
-        // Analyser — visualizer ට clean audio
         const analyser = recCtx.createAnalyser();
         analyser.fftSize = 64; analyser.smoothingTimeConstant = 0.75;
-        analyserRef.current = analyser;
-        compressor.connect(analyser); // Visualizer ට filtered audio
+        analyserRef.current = analyser; micSource.connect(analyser);
 
         const dataArray = new Uint8Array(analyser.frequencyBinCount);
         const drawWave = () => {
@@ -361,68 +310,38 @@ export default function Home() {
         };
         drawWave();
 
-        // ScriptProcessor reads filtered+compressed audio
         const processor = recCtx.createScriptProcessor(4096, 1, 1);
         scriptProcessorRef.current = processor;
-        compressor.connect(processor);
-        processor.connect(recCtx.destination);
-
-        // ─── Adaptive Noise Floor Calibration (~3s) ───────────────────────────────
-        calibrationSamplesRef.current = [];
-        noiseFloorRef.current = 0.005;
-        setNcStatus("calibrating");
-        const CALIBRATION_CHUNKS = 12; // ~3s at 4096/16000 ≈ 0.256s per chunk
 
         processor.onaudioprocess = (e) => {
           if (!ws || ws.readyState !== WebSocket.OPEN) return;
-          if (arixStateRef.current === "speaking") return;
+          // FIX: block mic when Arix speaking
+          if (arixStateRef.current === "speaking") {
+            console.log("🔴 MIC BLOCKED — Arix speaking");
+            return;
+          }
 
           const float32 = e.inputBuffer.getChannelData(0);
-          const volume = float32.reduce((s, v) => s + Math.abs(v), 0) / float32.length;
+          const vol = float32.reduce((s, v) => s + Math.abs(v), 0) / float32.length;
+          const isVoice = vol > 0.01;
 
-          // ── Calibration Phase: sample ambient noise ─────────────────────────────
-          if (calibrationSamplesRef.current.length < CALIBRATION_CHUNKS) {
-            calibrationSamplesRef.current.push(volume);
-            if (calibrationSamplesRef.current.length === CALIBRATION_CHUNKS) {
-              const sorted = [...calibrationSamplesRef.current].sort((a, b) => a - b);
-              // 95th percentile × 2.0 = safe noise floor margin
-              noiseFloorRef.current = sorted[Math.floor(sorted.length * 0.95)] * 2.0;
-              console.log(`[NC] ✅ Noise floor calibrated: ${(noiseFloorRef.current * 1000).toFixed(3)}`);
-              setNcStatus("active");
-            }
-            return; // Don't send audio during calibration
-          }
-
-          // ── Adaptive VAD: thresholds scale with measured noise floor ────────────
-          const SPEECH_THRESHOLD = Math.max(noiseFloorRef.current * 3.0, 0.008);
-          const SILENCE_THRESHOLD = Math.max(noiseFloorRef.current * 1.5, 0.004);
-
-          // EMA update noise floor during silence (continuous recalibration)
-          if (!isSpeakingRef.current && volume < SILENCE_THRESHOLD)
-            noiseFloorRef.current = noiseFloorRef.current * 0.995 + volume * 0.005;
-
-          if (volume > SPEECH_THRESHOLD && !isSpeakingRef.current) {
-            ws.send(JSON.stringify({ type: "activity_start" }));
+          if (isVoice && !isSpeakingRef.current) {
             isSpeakingRef.current = true;
-            if (activityEndTimerRef.current) {
-              clearTimeout(activityEndTimerRef.current);
-              activityEndTimerRef.current = null;
-            }
-          } else if (volume < SILENCE_THRESHOLD && isSpeakingRef.current) {
-            if (!activityEndTimerRef.current) {
-              activityEndTimerRef.current = setTimeout(() => {
-                if (ws.readyState === WebSocket.OPEN)
-                  ws.send(JSON.stringify({ type: "activity_end" }));
+            if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+            console.log("🎙️ activity_start sent | arixState:", arixStateRef.current);
+            ws.send(JSON.stringify({ type: "activity_start" }));
+          }
+          if (isVoice) {
+            if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+            silenceTimerRef.current = setTimeout(() => {
+              if (isSpeakingRef.current) {
                 isSpeakingRef.current = false;
-                activityEndTimerRef.current = null;
-              }, 400);
-            }
-          } else if (volume >= SILENCE_THRESHOLD && activityEndTimerRef.current) {
-            clearTimeout(activityEndTimerRef.current);
-            activityEndTimerRef.current = null;
+                console.log("🔇 activity_end sent");
+                ws.send(JSON.stringify({ type: "activity_end" }));
+              }
+            }, 1500);
           }
 
-          // Audio encoding & send
           const int16 = new Int16Array(float32.length);
           for (let i = 0; i < float32.length; i++)
             int16[i] = Math.max(-32768, Math.min(32767, Math.round(float32[i] * 32767)));
@@ -432,6 +351,8 @@ export default function Home() {
             binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
           ws.send(JSON.stringify({ type: "realtime_input", audio: btoa(binary) }));
         };
+
+        micSource.connect(processor); processor.connect(recCtx.destination);
 
         const visualCaptureLoop = setInterval(() => {
           if (!ws || ws.readyState !== WebSocket.OPEN) { clearInterval(visualCaptureLoop); return; }
@@ -449,6 +370,7 @@ export default function Home() {
           if (msg.type === "capture_screen_request") {
             if (!showExtensionPopup) window.postMessage({ type: "ARIX_CAPTURE_SCREEN" }, "*");
           } else if (msg.type === "audio" && msg.data) {
+            console.log("🔊 Audio chunk received — setting arixState=speaking");
             setArixState("speaking"); arixStateRef.current = "speaking";
             const bytes = new Uint8Array([...window.atob(msg.data)].map(c => c.charCodeAt(0)));
             const int16 = new Int16Array(bytes.buffer);
@@ -458,18 +380,15 @@ export default function Home() {
             if (audioContextRef.current?.state === "suspended") await audioContextRef.current.resume();
             if (!isPlayingRef.current) playNextAudioChunk();
           } else if (msg.type === "turn_complete") {
-            console.log("🎤 Ready - mic continues");
-            isSpeakingRef.current = false; // Reset for next speech
-            if (activityEndTimerRef.current) {
-              clearTimeout(activityEndTimerRef.current);
-              activityEndTimerRef.current = null;
-            }
-
+            console.log("✅ Turn complete — waiting for audio to finish");
             waitForAudioActiveRef.current = true;
             const wait = () => {
               if (!waitForAudioActiveRef.current) return;
               if (!isPlayingRef.current && !audioQueueRef.current.length) {
+                console.log("🎤 Audio done — mic now active | setting arixState=listening");
                 setArixState("listening"); arixStateRef.current = "listening";
+                isSpeakingRef.current = false;
+                if (silenceTimerRef.current) { clearTimeout(silenceTimerRef.current); silenceTimerRef.current = null; }
                 if (recordingContextRef.current?.state === "suspended") recordingContextRef.current.resume();
                 waitForAudioActiveRef.current = false;
               } else setTimeout(wait, 100);
@@ -489,14 +408,19 @@ export default function Home() {
           stopLiveSession();
           setTimeout(() => setLiveError(null), 6000);
         } else if (event.code === 1000) {
+          // Normal close — user stopped
           stopLiveSession();
         } else {
+          // Unexpected drop — auto reconnect!
           console.log("🔄 Session dropped — auto reconnecting in 1s...");
           wsRef.current = null;
+          // Clean up old ws resources but keep mic/audio alive
           if (scriptProcessorRef.current) { scriptProcessorRef.current.disconnect(); scriptProcessorRef.current = null; }
           if (micSourceRef.current) { micSourceRef.current.disconnect(); micSourceRef.current = null; }
           setTimeout(() => {
             if (isLive) {
+              console.log("🔄 Reconnecting now...");
+              // Re-setup WS + processor using existing stream
               const existingStream = streamRef.current;
               if (!existingStream) { stopLiveSession(); return; }
 
@@ -507,6 +431,7 @@ export default function Home() {
 
               ws2.onopen = () => {
                 wasConnected2 = true;
+                console.log("🔄 Reconnected!");
                 setArixState("listening"); arixStateRef.current = "listening";
 
                 const recCtx = recordingContextRef.current;
@@ -514,54 +439,29 @@ export default function Home() {
 
                 const micSource2 = recCtx.createMediaStreamSource(existingStream);
                 micSourceRef.current = micSource2;
-
-                // Reconnect: rebuild NC pipeline (reuse calibrated noiseFloor)
-                const hp2 = recCtx.createBiquadFilter();
-                hp2.type = "highpass"; hp2.frequency.value = 100; hp2.Q.value = 1;
-                highpassFilterRef.current = hp2;
-                const lp2 = recCtx.createBiquadFilter();
-                lp2.type = "lowpass"; lp2.frequency.value = 4000; lp2.Q.value = 1;
-                lowpassFilterRef.current = lp2;
-                const cmp2 = recCtx.createDynamicsCompressor();
-                cmp2.threshold.value = -25; cmp2.knee.value = 30;
-                cmp2.ratio.value = 12; cmp2.attack.value = 0.003; cmp2.release.value = 0.25;
-                compressorRef.current = cmp2;
-                micSource2.connect(hp2); hp2.connect(lp2); lp2.connect(cmp2);
-
                 const processor2 = recCtx.createScriptProcessor(4096, 1, 1);
                 scriptProcessorRef.current = processor2;
-                cmp2.connect(processor2);
-                processor2.connect(recCtx.destination);
 
                 processor2.onaudioprocess = (e) => {
                   if (!ws2 || ws2.readyState !== WebSocket.OPEN) return;
                   if (arixStateRef.current === "speaking") return;
-
                   const float32 = e.inputBuffer.getChannelData(0);
-                  const volume = float32.reduce((s, v) => s + Math.abs(v), 0) / float32.length;
-
-                  // Adaptive VAD using calibrated noise floor
-                  const SPEECH_THRESHOLD = Math.max(noiseFloorRef.current * 3.0, 0.008);
-                  const SILENCE_THRESHOLD = Math.max(noiseFloorRef.current * 1.5, 0.004);
-
-                  if (!isSpeakingRef.current && volume < SILENCE_THRESHOLD)
-                    noiseFloorRef.current = noiseFloorRef.current * 0.995 + volume * 0.005;
-
-                  if (volume > SPEECH_THRESHOLD && !isSpeakingRef.current) {
-                    ws2.send(JSON.stringify({ type: "activity_start" }));
+                  const vol = float32.reduce((s, v) => s + Math.abs(v), 0) / float32.length;
+                  const isVoice = vol > 0.01;
+                  if (isVoice && !isSpeakingRef.current) {
                     isSpeakingRef.current = true;
-                    if (activityEndTimerRef.current) { clearTimeout(activityEndTimerRef.current); activityEndTimerRef.current = null; }
-                  } else if (volume < SILENCE_THRESHOLD && isSpeakingRef.current) {
-                    if (!activityEndTimerRef.current) {
-                      activityEndTimerRef.current = setTimeout(() => {
-                        if (ws2.readyState === WebSocket.OPEN) ws2.send(JSON.stringify({ type: "activity_end" }));
-                        isSpeakingRef.current = false; activityEndTimerRef.current = null;
-                      }, 400);
-                    }
-                  } else if (volume >= SILENCE_THRESHOLD && activityEndTimerRef.current) {
-                    clearTimeout(activityEndTimerRef.current); activityEndTimerRef.current = null;
+                    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+                    ws2.send(JSON.stringify({ type: "activity_start" }));
                   }
-
+                  if (isVoice) {
+                    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+                    silenceTimerRef.current = setTimeout(() => {
+                      if (isSpeakingRef.current) {
+                        isSpeakingRef.current = false;
+                        ws2.send(JSON.stringify({ type: "activity_end" }));
+                      }
+                    }, 1500);
+                  }
                   const int16 = new Int16Array(float32.length);
                   for (let i = 0; i < float32.length; i++)
                     int16[i] = Math.max(-32768, Math.min(32767, Math.round(float32[i] * 32767)));
@@ -571,10 +471,16 @@ export default function Home() {
                     binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
                   ws2.send(JSON.stringify({ type: "realtime_input", audio: btoa(binary) }));
                 };
+                micSource2.connect(processor2);
+                processor2.connect(recCtx.destination);
               };
 
               ws2.onmessage = ws.onmessage;
               ws2.onclose = (e2) => {
+                console.log(`[WS2] Closed — code: ${e2.code}`);
+                if (e2.code !== 1000 && wasConnected2) {
+                  console.log("🔄 Second reconnect attempt...");
+                }
                 stopLiveSession();
               };
               ws2.onerror = () => console.error("[WS2] error");
@@ -645,15 +551,6 @@ export default function Home() {
         <PenTool size={18} /> Open Whiteboard
       </motion.button>
 
-      {/* Center Top — Branding Badges */}
-      <motion.div initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.25 }}
-        className="absolute top-7 left-1/2 -translate-x-1/2 flex flex-col items-center gap-1.5 z-10 pointer-events-none">
-        <div className="flex items-center gap-2 px-4 py-1.5 rounded-full bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 text-green-800 text-[10px] font-bold tracking-widest uppercase shadow-sm whitespace-nowrap">
-          <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse shadow-[0_0_6px_rgba(34,197,94,0.8)]" />
-          🔇 Inbuilt Noise Cancelling System
-        </div>
-      </motion.div>
-
       {/* Whiteboard */}
       <AnimatePresence>
         {showWhiteboard && (
@@ -723,10 +620,8 @@ export default function Home() {
               <h1 className="text-[4.5rem] md:text-[6rem] font-black text-transparent bg-clip-text bg-linear-to-br from-gray-900 via-gray-800 to-gray-600 tracking-tight uppercase leading-[1.1]">
                 Arix AI
               </h1>
-              <div className="mt-5 flex flex-col items-center gap-3">
-                <div className="flex items-center gap-2 px-4 py-1.5 rounded-full bg-blue-100/50 border border-blue-200 text-blue-800 text-sm font-semibold">
-                  𝖸𝖮𝖴𝖱 𝖠𝖨 𝖳𝖴𝖳𝖮𝖱 𝖶𝖨𝖳𝖧 𝖬𝖤𝖬𝖮𝖱𝖸
-                </div>
+              <div className="mt-4 px-4 py-1.5 rounded-full bg-blue-100/50 border border-blue-200 text-blue-800 text-sm font-semibold flex items-center gap-2">
+                🧠 Your AI Tutor with Memory
               </div>
             </motion.div>
           ) : (
@@ -773,46 +668,25 @@ export default function Home() {
           <AnimatePresence>
             {isLive && (
               <motion.div initial={{ opacity: 0, scaleY: 0 }} animate={{ opacity: 1, scaleY: 1 }} exit={{ opacity: 0, scaleY: 0 }}
-                className="flex flex-col items-center gap-3 w-full" style={{ transformOrigin: "bottom" }}>
-
-                {/* NC Status Badge */}
-                <AnimatePresence mode="wait">
-                  {ncStatus === "calibrating" && (
-                    <motion.div key="cal" initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -6 }}
-                      className="flex items-center gap-2 bg-amber-50 border border-amber-200 text-amber-700 rounded-full px-4 py-1.5 text-xs font-semibold shadow-sm">
-                      <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
-                      🎚️ Noise Calibrating...
-                    </motion.div>
-                  )}
-                  {ncStatus === "active" && (
-                    <motion.div key="active" initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -6 }}
-                      className="flex items-center gap-2 bg-green-50 border border-green-200 text-green-700 rounded-full px-4 py-1.5 text-xs font-semibold shadow-sm">
-                      <span className="w-2 h-2 rounded-full bg-green-400" />
-                      🔇 Noise Cancellation Active
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-
-                {/* Mic Visualizer Bars */}
-                <div className="flex items-end justify-center gap-0.5 h-16 w-full max-w-xs">
-                  {micVolume.map((vol, i) => {
-                    const dist = Math.abs(i - 10) / 10;
-                    return <div key={i} style={{
-                      height: `${Math.max(4, vol * 56 * (1 - dist * 0.3))}px`,
-                      opacity: 0.4 + vol * 0.6,
-                      background: "linear-gradient(to top, #7ba2e8, #c4b5fd)",
-                      transition: "height 60ms ease-out",
-                      borderRadius: "9999px", width: "6px", flexShrink: 0,
-                    }} />;
-                  })}
-                </div>
+                className="flex items-end justify-center gap-0.5 h-16 w-full max-w-xs" style={{ transformOrigin: "bottom" }}>
+                {micVolume.map((vol, i) => {
+                  const dist = Math.abs(i - 10) / 10;
+                  return <div key={i} style={{
+                    height: `${Math.max(4, vol * 56 * (1 - dist * 0.3))}px`,
+                    opacity: 0.4 + vol * 0.6,
+                    background: "linear-gradient(to top, #7ba2e8, #c4b5fd)",
+                    transition: "height 60ms ease-out",
+                    borderRadius: "9999px", width: "6px", flexShrink: 0,
+                  }} />;
+                })}
               </motion.div>
             )}
           </AnimatePresence>
 
           <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }} onClick={toggleLive}
-            className={`group relative flex items-center justify-center gap-3 px-10 py-5 rounded-4xl shadow-xl text-xl font-bold tracking-wide transition-all duration-300 overflow-hidden ${isLive ? "bg-red-500 text-white ring-4 ring-red-500/20" : "bg-white text-gray-800 hover:text-[#7ba2e8] border border-gray-200 shadow-[0_10px_30px_rgba(0,0,0,0.05)]"
-              }`}>
+            className={`group relative flex items-center justify-center gap-3 px-10 py-5 rounded-4xl shadow-xl text-xl font-bold tracking-wide transition-all duration-300 overflow-hidden ${
+              isLive ? "bg-red-500 text-white ring-4 ring-red-500/20" : "bg-white text-gray-800 hover:text-[#7ba2e8] border border-gray-200 shadow-[0_10px_30px_rgba(0,0,0,0.05)]"
+            }`}>
             {isLive && <span className="absolute inset-0 bg-red-400 opacity-20 blur-xl animate-pulse" />}
             {isLive ? (
               <><StopCircle size={28} className="fill-white/20" /><span>Stop Live Session</span></>
@@ -864,8 +738,9 @@ export default function Home() {
               )}
               {chatMessages.map((msg, i) => (
                 <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
-                  <div className={`max-w-[80%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${msg.role === "user" ? "bg-linear-to-r from-blue-500 to-indigo-500 text-white rounded-br-sm" : "bg-gray-100 text-gray-800 rounded-bl-sm"
-                    }`}>{msg.text}</div>
+                  <div className={`max-w-[80%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
+                    msg.role === "user" ? "bg-linear-to-r from-blue-500 to-indigo-500 text-white rounded-br-sm" : "bg-gray-100 text-gray-800 rounded-bl-sm"
+                  }`}>{msg.text}</div>
                 </div>
               ))}
               {isChatLoading && (
