@@ -113,7 +113,7 @@ export default function Home() {
       wsRef.current = ws;
 
       ws.onopen = () => {
-        log("✅ websocket connected");
+        log("✅ websocket connect");
 
         const recCtx = recordingContextRef.current!;
         const micSource = recCtx.createMediaStreamSource(stream);
