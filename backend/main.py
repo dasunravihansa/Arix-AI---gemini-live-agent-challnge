@@ -86,6 +86,53 @@ class ConversationManager:
         return f"Session {self.session_id}: {user_msgs} user msgs, {asst_msgs} assistant msgs"
 
 
+# ─── Live Session Manager ─────────────────────────────────────────────────────
+class LiveSessionManager:
+    """Manages live session state and context injection"""
+    def __init__(self, session_id: str, conversation: ConversationManager):
+        self.session_id = session_id
+        self.conversation = conversation
+        self.last_context_sent = ""
+        self.message_count = 0
+        self.last_activity = datetime.now()
+    
+    def should_send_context(self) -> bool:
+        """Check if we need to send context to Gemini"""
+        if self.message_count > 0 and self.message_count % 3 == 0:
+            return True
+        if (datetime.now() - self.last_activity).seconds > 30:
+            return True
+        return False
+    
+    def get_context_for_gemini(self) -> str:
+        """Get formatted context for Gemini"""
+        if len(self.conversation.history) < 2:
+            return ""
+        
+        recent = [msg for msg in self.conversation.history[-8:] if msg["role"] != "system"]
+        if not recent:
+            return ""
+        
+        context = "\n\n[CONVERSATION HISTORY - Remember this!]\n"
+        for msg in recent:
+            role = "User" if msg["role"] == "user" else "Arix"
+            context += f"{role}: {msg['content']}\n"
+        context += "\n[END OF HISTORY] - Continue the conversation naturally.\n"
+        
+        self.last_context_sent = context
+        return context
+    
+    def add_user_message(self, content: str, msg_type: str = "audio"):
+        self.conversation.add_user_message(content, msg_type)
+        self.message_count += 1
+        self.last_activity = datetime.now()
+    
+    def add_assistant_message(self, content: str):
+        self.conversation.add_assistant_message(content)
+        self.message_count += 1
+        self.last_activity = datetime.now()
+
+
 # ─── Gemini Client Setup ──────────────────────────────────────────────────────
 PROJECT_ID = os.getenv("GOOGLE_CLOUD_PROJECT", "arix-ai-489306")
 LOCATION   = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
@@ -94,6 +141,7 @@ text_client = None
 live_client = None
 MODEL = None
 active_conversations: Dict[str, ConversationManager] = {}
+active_live_sessions: Dict[str, LiveSessionManager] = {}
 
 try:
     import vertexai
@@ -203,10 +251,12 @@ async def live_voice_session(websocket: WebSocket):
 
     session_id = websocket.query_params.get("session_id", f"live_{datetime.now().timestamp()}")
     conversation = get_conversation(session_id)
-    print(f"[SESSION] Started | ID: {session_id}")
+    
+    if session_id not in active_live_sessions:
+        active_live_sessions[session_id] = LiveSessionManager(session_id, conversation)
+    session_manager = active_live_sessions[session_id]
 
-    # Track messages
-    message_counter = 0
+    print(f"[SESSION] Started | ID: {session_id} | Messages: {session_manager.message_count}")
 
     if not live_client or not MODEL:
         await websocket.send_json({"type": "error", "message": "Live API unavailable."})
@@ -217,10 +267,15 @@ async def live_voice_session(websocket: WebSocket):
         config = build_config(conversation)
         async with live_client.aio.live.connect(model=MODEL, config=config) as session:
             print(f"[GEMINI] Live session started [{MODEL}] | {session_id}")
-            conversation.add_system_message("Live session started")
+            session_manager.conversation.add_system_message("Live session started")
+
+            if session_manager.message_count > 0:
+                context = session_manager.get_context_for_gemini()
+                if context:
+                    print(f"[CONTEXT] Sending initial conversation history to Gemini")
+                    await session.send(input=context)
 
             async def receive_from_gemini():
-                nonlocal message_counter
                 try:
                     async for response in session.receive():
                         if response.server_content:
@@ -236,9 +291,8 @@ async def live_voice_session(websocket: WebSocket):
                                             "mime_type": part.inline_data.mime_type or "audio/pcm",
                                         })
                                     elif part.text:
-                                        message_counter += 1
-                                        print(f"[SESSION:{session_id}] Message #{message_counter}: {part.text[:80]}")
-                                        conversation.add_assistant_message(part.text)
+                                        session_manager.add_assistant_message(part.text)
+                                        print(f"[SESSION:{session_id}] Message #{session_manager.message_count}: {part.text[:80]}")
                                         await websocket.send_json({"type": "live_text", "data": part.text})
 
                             if getattr(sc, 'turn_complete', False):
@@ -293,16 +347,21 @@ async def live_voice_session(websocket: WebSocket):
                             await session.send_realtime_input(
                                 media=types.Blob(data=img_bytes, mime_type="image/jpeg")
                             )
-                            conversation.add_user_message("[Sent whiteboard image]", "image")
+                            session_manager.add_user_message("[Sent whiteboard image]", "image")
                         if "text" in msg:
-                            # Context injection into live session
                             text_ctx = msg["text"]
-                            print(f"[TEXT IN] Injecting text/context to Gemini: {text_ctx[:80]}...")
+                            print(f"[TEXT IN] Context: {text_ctx[:80]}...")
                             try:
                                 await session.send(input=text_ctx)
-                                conversation.add_user_message(text_ctx, "text")
+                                session_manager.add_user_message(text_ctx, "text")
                             except Exception as e:
                                 print(f"[ERROR] sending text context: {e}")
+
+                        if session_manager.should_send_context():
+                            context = session_manager.get_context_for_gemini()
+                            if context and context != session_manager.last_context_sent:
+                                print(f"[CONTEXT] Refreshing Gemini memory with recent conversation")
+                                await session.send(input=context)
 
                 except WebSocketDisconnect:
                     print(f"[WS] Disconnected in send_to_gemini | {session_id}")
@@ -324,6 +383,8 @@ async def live_voice_session(websocket: WebSocket):
         except Exception:
             pass
     finally:
+        if session_id in active_live_sessions:
+            del active_live_sessions[session_id]
         print(f"[WS] Session ended | {conversation.get_summary()}")
 
 
