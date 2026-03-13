@@ -536,27 +536,6 @@ export default function Home() {
       if (arixStateRef.current === "speaking") return;
 
       const float32 = e.inputBuffer.getChannelData(0);
-      const vol =
-        float32.reduce((sum, v) => sum + Math.abs(v), 0) / float32.length;
-
-      const isVoice = vol > 0.005;
-
-      if (isVoice && !isSpeakingRef.current) {
-        isSpeakingRef.current = true;
-        if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-        ws.send(JSON.stringify({ type: "activity_start" }));
-      }
-
-      if (isVoice) {
-        if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-        silenceTimerRef.current = setTimeout(() => {
-          if (isSpeakingRef.current && ws.readyState === WebSocket.OPEN) {
-            isSpeakingRef.current = false;
-            ws.send(JSON.stringify({ type: "activity_end" }));
-          }
-        }, 1000);
-      }
-
       const int16 = new Int16Array(float32.length);
       for (let i = 0; i < float32.length; i++) {
         int16[i] = Math.max(

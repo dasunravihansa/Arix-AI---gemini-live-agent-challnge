@@ -196,7 +196,7 @@ def build_config() -> types.LiveConnectConfig:
             )
         ),
         realtime_input_config=types.RealtimeInputConfig(
-            automatic_activity_detection=types.AutomaticActivityDetection(disabled=True)
+            automatic_activity_detection=types.AutomaticActivityDetection()
         ),
         system_instruction=types.Content(
             parts=[types.Part.from_text(text=get_dynamic_system_prompt())]
