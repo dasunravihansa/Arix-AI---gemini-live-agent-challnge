@@ -41,6 +41,7 @@ export default function Home() {
   const [isLive, setIsLive] = useState(false);
   const [showExtensionPopup, setShowExtensionPopup] = useState(false);
   const [showWhiteboard, setShowWhiteboard] = useState(false);
+  const [whiteboardSent, setWhiteboardSent] = useState(false);
   const [isDrawing, setIsDrawing] = useState(false);
   const [drawMode, setDrawMode] = useState<DrawMode>("draw");
   const [drawColor, setDrawColor] = useState<string>("#1f2937");
@@ -267,6 +268,39 @@ export default function Home() {
       canvasRef.current.height
     );
     whiteboardDirtyRef.current = true;
+  };
+
+  // ─── Ask Arix about whiteboard ────────────────────────────────────────────
+  const sendWhiteboardToArix = () => {
+    if (!canvasRef.current) return;
+
+    // Live session නෑ නම් → error
+    if (!isLive || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      setLiveError("🎙️ Start Live Session first, then ask Arix!");
+      setTimeout(() => setLiveError(null), 3000);
+      return;
+    }
+
+    // Canvas image capture
+    const imageData = canvasRef.current.toDataURL("image/jpeg", 0.85);
+    const b64 = imageData.split(",")[1];
+
+    // 1) Image send
+    wsRef.current.send(JSON.stringify({ type: "image_input", image: b64 }));
+
+    // 2) Text prompt send (Arix ට respond කරන්න trigger)
+    wsRef.current.send(
+      JSON.stringify({
+        type: "text_input",
+        text: "I just shared my whiteboard with you. Please look at it carefully and help me — explain what you see, solve any problems, or answer any questions written on it.",
+      })
+    );
+
+    whiteboardDirtyRef.current = false;
+
+    // Visual feedback
+    setWhiteboardSent(true);
+    setTimeout(() => setWhiteboardSent(false), 2000);
   };
 
   // ─── TTS for chat only ─────────────────────────────────────────────────────
@@ -870,19 +904,51 @@ export default function Home() {
                     <PenTool size={20} className="text-blue-500" />
                     AI Whiteboard
                   </h2>
-                  <span className="px-3 py-1 bg-green-100 text-green-700 text-xs font-bold rounded-full animate-pulse">
-                    Visible to Arix
-                  </span>
+                  {isLive ? (
+                    <span className="px-3 py-1 bg-green-100 text-green-700 text-xs font-bold rounded-full animate-pulse">
+                      ● Arix is watching
+                    </span>
+                  ) : (
+                    <span className="px-3 py-1 bg-gray-100 text-gray-500 text-xs font-semibold rounded-full">
+                      Start Live to enable Arix
+                    </span>
+                  )}
                 </div>
-                <button
-                  onClick={() => {
-                    setShowWhiteboard(false);
-                    ctxRef.current = null;
-                  }}
-                  className="px-4 py-2 bg-gray-100 text-gray-700 flex items-center gap-2 rounded-xl font-semibold hover:bg-gray-200 transition-colors"
-                >
-                  <X size={16} /> Close
-                </button>
+
+                <div className="flex items-center gap-3">
+                  {/* ASK ARIX BUTTON — main addition */}
+                  <motion.button
+                    whileHover={{ scale: 1.04 }}
+                    whileTap={{ scale: 0.95 }}
+                    onClick={sendWhiteboardToArix}
+                    className={`flex items-center gap-2 px-5 py-2.5 rounded-xl font-bold text-sm shadow-md transition-all ${
+                      whiteboardSent
+                        ? "bg-green-500 text-white"
+                        : isLive
+                        ? "bg-gradient-to-r from-blue-500 to-indigo-600 text-white hover:shadow-lg hover:-translate-y-0.5"
+                        : "bg-gray-100 text-gray-400 cursor-not-allowed"
+                    }`}
+                  >
+                    {whiteboardSent ? (
+                      <>✅ Sent to Arix!</>
+                    ) : (
+                      <>
+                        <span className="text-base">👁️</span>
+                        Ask Arix
+                      </>
+                    )}
+                  </motion.button>
+
+                  <button
+                    onClick={() => {
+                      setShowWhiteboard(false);
+                      ctxRef.current = null;
+                    }}
+                    className="px-4 py-2 bg-gray-100 text-gray-700 flex items-center gap-2 rounded-xl font-semibold hover:bg-gray-200 transition-colors"
+                  >
+                    <X size={16} /> Close
+                  </button>
+                </div>
               </div>
 
               <div className="flex-1 relative overflow-hidden">
