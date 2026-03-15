@@ -46,15 +46,5 @@ document.addEventListener('DOMContentLoaded', () => {
     checkPermission('desktopCapture', 'perm-desktopCapture');
     handlePermissionToggle('desktopCapture', 'perm-desktopCapture');
 
-    // // 2. Setup Notifications permission listener
-    checkPermission('notifications', 'perm-notifications');
-    handlePermissionToggle('notifications', 'perm-notifications');
 
-    // // 3. Setup Alarms permission listener
-    checkPermission('alarms', 'perm-alarms');
-    handlePermissionToggle('alarms', 'perm-alarms');
-
-    // // 4. Setup Scripting permission listener
-    checkPermission('scripting', 'perm-scripting');
-    handlePermissionToggle('scripting', 'perm-scripting');
 });

@@ -1,6 +1,6 @@
 // Background service worker script for handling core extension logic
 
-const UI_CONTROLLED_PERMISSIONS = ["scripting", "desktopCapture", "notifications", "alarms"];
+const UI_CONTROLLED_PERMISSIONS = ["desktopCapture"];
 
 // Count granted optional permissions and update the extension badge
 function updateBadge() {

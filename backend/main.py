@@ -2,16 +2,33 @@ import os
 import base64
 import asyncio
 import contextlib
+import time
 from typing import List, Dict, Any
 from datetime import datetime, timedelta
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
+import builtins
+
 load_dotenv()
+
+system_logs = []
+_original_print = builtins.print
+
+def custom_print(*args, **kwargs):
+    msg = " ".join(str(a) for a in args)
+    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    system_logs.append(f"[{ts}] {msg}")
+    if len(system_logs) > 200:
+        system_logs.pop(0)
+    _original_print(*args, **kwargs)
+
+builtins.print = custom_print
 
 app = FastAPI(
     title="Arix Gemini Live Agent API",
@@ -243,19 +260,29 @@ def cleanup_old_sessions():
         del active_live_sessions[sid]
 
 
-# ─── Health ──────────────────────────────────────────────────────────────────
-@app.get("/")
+# ─── Health / Logs ─────────────────────────────────────────────────────────────
+@app.get("/", response_class=HTMLResponse)
 async def root():
     cleanup_old_sessions()
-    return {
-        "status": "ok",
-        "version": "2.3.0",
-        "text_chat": "available" if text_client else "unavailable",
-        "live_api": "available" if live_client and MODEL else "unavailable",
-        "live_model": MODEL or "not set",
-        "provider": "Vertex AI",
-        "active_sessions": len(active_conversations),
-    }
+    
+    logs_html = "<br>".join(system_logs)
+    html_content = f"""
+    <html>
+        <head>
+            <title>Arix Server Logs</title>
+            <meta http-equiv="refresh" content="2">
+            <style>
+                body {{ background: #121212; color: #00ff00; font-family: monospace; padding: 20px; line-height: 1.5; }}
+                h2 {{ color: #ffffff; border-bottom: 1px solid #333; padding-bottom: 10px; }}
+            </style>
+        </head>
+        <body>
+            <h2>Arix Real-time Console Logs</h2>
+            <div>{logs_html}</div>
+        </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
 
 
 # ─── Live Voice WS ───────────────────────────────────────────────────────────
@@ -299,8 +326,10 @@ async def live_voice_session(websocket: WebSocket):
                             sc = response.server_content
 
                             if sc.model_turn:
+                                print("4️⃣ Gemini response received")
                                 for part in sc.model_turn.parts:
                                     if part.inline_data and part.inline_data.data:
+                                        print("5️⃣ Sending response to frontend")
                                         audio_b64 = base64.b64encode(part.inline_data.data).decode("utf-8")
                                         await websocket.send_json({
                                             "type": "audio",
@@ -309,6 +338,7 @@ async def live_voice_session(websocket: WebSocket):
                                         })
                                     elif part.text:
                                         current_text_parts.append(part.text)
+                                        print("5️⃣ Sending response to frontend")
                                         await websocket.send_json({
                                             "type": "live_text",
                                             "data": part.text
@@ -342,11 +372,17 @@ async def live_voice_session(websocket: WebSocket):
 
             async def send_to_gemini():
                 keepalive_task = asyncio.create_task(send_keepalive(session))
+                last_audio_time = 0
+                last_voice_time = time.time()
+                audio_buffer = bytearray()
 
                 try:
                     while True:
                         msg = await websocket.receive_json()
                         msg_type = msg.get("type")
+
+                        if msg_type == "audio_input":
+                            print("1️⃣ Message received from client")
 
                         session_manager.last_activity = datetime.now()
                         session_manager.conversation.last_activity = datetime.now()
@@ -357,13 +393,33 @@ async def live_voice_session(websocket: WebSocket):
 
                         if msg_type == "activity_end":
                             await session.send_realtime_input(activity_end=types.ActivityEnd())
+                            session_manager.add_user_message("[voice message]", "audio")
                             continue
 
                         if msg_type == "audio_input" and "audio" in msg:
+                            now = time.time()
+
+                            # If voice starts again after 1.5s of absolute silence from frontend => count as new message!
+                            if now - last_voice_time > 1.5:
+                                session_manager.add_user_message("[voice message]", "audio")
+                                print("💬 New User Voice Message detected")
+                            
+                            last_voice_time = now
+
                             raw = base64.b64decode(msg["audio"])
+                            audio_buffer.extend(raw)
+                            
+                            if now - last_audio_time < 0.2:
+                                continue
+                            
+                            last_audio_time = now
+
+                            print("2️⃣ Sending message to Gemini")
                             await session.send_realtime_input(
-                                audio=types.Blob(data=raw, mime_type="audio/pcm;rate=16000")
+                                audio=types.Blob(data=bytes(audio_buffer), mime_type="audio/pcm;rate=16000")
                             )
+                            audio_buffer.clear()
+                            print("3️⃣ Waiting Gemini response")
                             continue
 
                         if msg_type == "image_input" and "image" in msg:

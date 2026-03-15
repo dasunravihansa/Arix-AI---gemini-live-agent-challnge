@@ -10,10 +10,7 @@
   ],
   "optional_permissions": [
     "tabs",
-    "scripting",
-    "desktopCapture",
-    "notifications",
-    "alarms"
+    "desktopCapture"
   ],
   "host_permissions": [
     "<all_urls>"
