@@ -69,7 +69,7 @@ npm run dev
 ---
 
 ## 🎥 Demonstration
-[Link to YouTube/Vimeo Demo here]
+[https://www.youtube.com/watch?v=dVN45WFnFQg]
 
 ## 📜 Proof of Google Cloud Deployment
-Please refer to `backend/main.py`. The initialization utilizes `genai.Client(vertexai=True, project=PROJECT_ID, location=LOCATION)` strictly pointing to our assigned GCP Environment (`arix-ai-488604`).
+Please refer to `backend/main.py`. The initialization utilizes `genai.Client(vertexai=True, project=PROJECT_ID, location=LOCATION)` strictly pointing to our assigned GCP Environment (`https://arix-backend-103963879704.us-central1.run.app/`).
